@@ -25,7 +25,10 @@ export class ParquetWriter {
 
     // Initialize schema service if app is available
     if (this.app) {
-      this.schemaService = new SchemaService(this.app);
+      this.schemaService = new SchemaService(
+        this.app,
+        options.compression ?? 'SNAPPY'
+      );
     }
   }
 

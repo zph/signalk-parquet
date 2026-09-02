@@ -84,6 +84,59 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
     await host?.cleanup();
   });
 
+  it('writes Snappy raw files by default and reads them with uncompressed files', async () => {
+    const records = Array.from({ length: 1000 }, (_, index) =>
+      scalarRecord(
+        'navigation.speedOverGround',
+        index % 20,
+        new Date(DAY.getTime() + index * 1000).toISOString()
+      )
+    );
+    const snappyPath = path.join(host.dataDir, 'snappy.parquet');
+    const uncompressedPath = path.join(host.dataDir, 'uncompressed.parquet');
+    const snappyWriter = new ParquetWriter({
+      format: 'parquet',
+      app: host.app,
+    });
+    const uncompressedWriter = new ParquetWriter({
+      format: 'parquet',
+      app: host.app,
+      compression: 'UNCOMPRESSED',
+    });
+
+    const snappySchema = await snappyWriter.createParquetSchema(records);
+    const uncompressedSchema =
+      await uncompressedWriter.createParquetSchema(records);
+    expect(
+      Object.values(snappySchema.fields).every(
+        (field: any) => field.compression === 'SNAPPY'
+      )
+    ).to.equal(true);
+    expect(
+      Object.values(uncompressedSchema.fields).every(
+        (field: any) => field.compression === 'UNCOMPRESSED'
+      )
+    ).to.equal(true);
+
+    await snappyWriter.writeRecords(snappyPath, records);
+    await uncompressedWriter.writeRecords(uncompressedPath, records);
+
+    const conn = await DuckDBPool.getConnection();
+    try {
+      const res = await conn.runAndReadAll(
+        `SELECT COUNT(*) AS n
+         FROM read_parquet(['${toGlob(snappyPath)}', '${toGlob(uncompressedPath)}'])`
+      );
+      const row = res.getRowObjects()[0] as { n: bigint };
+      expect(Number(row.n)).to.equal(records.length * 2);
+      expect((await fs.stat(snappyPath)).size).to.be.lessThan(
+        (await fs.stat(uncompressedPath)).size
+      );
+    } finally {
+      conn.disconnectSync();
+    }
+  });
+
   it('exports buffered scalar records to a Hive-partitioned parquet tree', async () => {
     for (let i = 0; i < 5; i++) {
       buffer.insert(

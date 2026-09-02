@@ -214,6 +214,7 @@ Configure basic plugin settings (path configuration is managed separately in the
 | **Output Directory** | Directory to save data files | SignalK data directory |
 | **Filename Prefix** | Prefix for generated filenames | `signalk_data` |
 | **File Format** | Output format (parquet, json, csv) | `parquet` |
+| **Raw Parquet Compression** | Compression for raw-tier Parquet files (`SNAPPY` or `UNCOMPRESSED`) | `SNAPPY` |
 | **Retention Days** | Days to keep processed files | 7 |
 | **Daily Export Hour** | Hour (0-23 UTC) to run daily Parquet export | 4 |
 | **Export Batch Size** | Max records to export per cycle (1,000-200,000) | 50000 |
@@ -365,6 +366,7 @@ interface PluginConfig {
   outputDirectory: string;
   filenamePrefix: string;
   fileFormat: 'json' | 'csv' | 'parquet';
+  parquetCompression: 'SNAPPY' | 'UNCOMPRESSED';
   retentionDays: number;
   vesselMMSI: string;
   cloudUpload: CloudUploadConfig;

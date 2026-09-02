@@ -287,6 +287,10 @@ export default function (app: ServerAPI): SignalKPlugin {
       ),
       configSchemaVersion: 1,
       fileFormat: options?.fileFormat || 'parquet',
+      parquetCompression:
+        options?.parquetCompression === 'UNCOMPRESSED'
+          ? 'UNCOMPRESSED'
+          : 'SNAPPY',
       vesselMMSI: vesselMMSI,
       cloudUpload: (() => {
         // New config format already present
@@ -369,6 +373,7 @@ export default function (app: ServerAPI): SignalKPlugin {
     state.parquetWriter = new ParquetWriter({
       format: state.currentConfig.fileFormat,
       app: app,
+      compression: state.currentConfig.parquetCompression,
     });
 
     // Initialize SQLite buffer if enabled
@@ -1150,6 +1155,15 @@ export default function (app: ServerAPI): SignalKPlugin {
         description:
           'Prefix added to all generated Parquet files. Useful if running multiple instances or for organizing data. Example: "boat_name" produces "boat_name_2024-01-15T1200.parquet"',
         default: 'signalk_data',
+      },
+      parquetCompression: {
+        type: 'string',
+        title: 'Raw Parquet Compression',
+        description:
+          'Compression for raw-tier Parquet files. Snappy is recommended for substantially lower storage use with fast reads and writes. Existing uncompressed files remain readable alongside compressed files. Aggregated tiers already use Snappy.',
+        enum: ['SNAPPY', 'UNCOMPRESSED'],
+        enumNames: ['Snappy (recommended)', 'Uncompressed'],
+        default: 'SNAPPY',
       },
       retentionDays: {
         type: 'integer',
