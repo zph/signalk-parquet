@@ -27,8 +27,8 @@ import {
   updateDataSubscriptions,
   initializeRegimenStates,
   saveAllBuffers,
-  uploadAllConsolidatedFilesToS3,
-  uploadConsolidatedFilesToS3,
+  uploadAllConsolidatedFilesToS3 as legacyUploadAllConsolidatedFilesToS3,
+  uploadConsolidatedFilesToS3 as legacyUploadConsolidatedFilesToS3,
 } from './data-handler';
 import { ServerAPI } from '@signalk/server-api';
 import { DuckDBPool } from './utils/duckdb-pool';
@@ -51,6 +51,7 @@ import {
   validatePathRetentionRules,
 } from './utils/retention-rules';
 import { AutoDiscoveryService } from './services/auto-discovery';
+import { ArchiveMode } from './archive-mode';
 
 // How long plugin.stop() waits for an aggregation worker to finish its
 // in-flight COPY and exit after a cooperative shutdown request, before
@@ -204,10 +205,71 @@ export default function (app: ServerAPI): SignalKPlugin {
   };
 
   let currentPaths: PathConfig[] = [];
+  let archive: ArchiveMode | undefined;
+  let archiveMode: 'local' | 'producer' | 'replica' = 'local';
+  const publishManagedArchive = async () => {
+    if (!state.sqliteBuffer?.isOpen())
+      throw new Error('ARCHIVE_BUFFER_UNAVAILABLE');
+    const excluded = (
+      state.sqliteBuffer as SQLiteBuffer
+    ).getDatesWithUnexportedRecords(false);
+    await archive!.publish(excluded);
+  };
+  const uploadAllConsolidatedFilesToS3 = async (
+    ...args: Parameters<typeof legacyUploadAllConsolidatedFilesToS3>
+  ) => {
+    if (archiveMode === 'producer') {
+      if (!archive) return;
+      return publishManagedArchive();
+    }
+    return legacyUploadAllConsolidatedFilesToS3(...args);
+  };
+  const uploadConsolidatedFilesToS3 = async (
+    ...args: Parameters<typeof legacyUploadConsolidatedFilesToS3>
+  ) => {
+    if (archiveMode === 'producer') {
+      if (!archive) return;
+      return publishManagedArchive();
+    }
+    return legacyUploadConsolidatedFilesToS3(...args);
+  };
 
   plugin.start = async function (
     options: Partial<PluginConfig>
   ): Promise<void> {
+    if (
+      options?.archiveMode &&
+      !['local', 'producer', 'replica'].includes(options.archiveMode)
+    ) {
+      throw new Error('INVALID_ARCHIVE_MODE');
+    }
+    archiveMode = options?.archiveMode || 'local';
+    if (archiveMode !== 'local') {
+      const warning = options.archiveWarningHours ?? 24;
+      const alarm = options.archiveAlarmHours ?? 72;
+      if (
+        !Number.isFinite(warning) ||
+        !Number.isFinite(alarm) ||
+        warning <= 0 ||
+        alarm <= warning
+      )
+        throw new Error('INVALID_ARCHIVE_THRESHOLDS');
+      archive = new ArchiveMode(app, options);
+      try {
+        await archive.start();
+      } catch (error) {
+        app.setPluginError(
+          'Archive ownership unavailable or conflicting; use replica for an existing archive'
+        );
+        throw error;
+      }
+      if (archiveMode === 'replica') return;
+      // Managed publishing retains local raw files; ordinary retention is separate.
+      options = {
+        ...options,
+        cloudUpload: { ...options.cloudUpload!, deleteAfterUpload: false },
+      };
+    }
     // Reconfigure runs stop() then start(); re-arm scheduled work.
     state.isStopping = false;
     state.activeAggregationWorkers ??= new Set<ChildProcess>();
@@ -268,6 +330,11 @@ export default function (app: ServerAPI): SignalKPlugin {
     }
 
     state.currentConfig = {
+      archiveMode,
+      archiveSource: options?.archiveSource,
+      archiveCoverageStart: options?.archiveCoverageStart,
+      archiveWarningHours: options?.archiveWarningHours,
+      archiveAlarmHours: options?.archiveAlarmHours,
       bufferSize: options?.bufferSize || 1000,
       saveIntervalSeconds: options?.saveIntervalSeconds || 30,
       outputDirectory: options?.outputDirectory?.trim()
@@ -942,6 +1009,9 @@ export default function (app: ServerAPI): SignalKPlugin {
   };
 
   plugin.stop = async function (): Promise<void> {
+    await archive?.stop();
+    archive = undefined;
+    if (archiveMode === 'replica') return;
     // Flag first so any timer/interval callback that fires during this
     // async teardown becomes a no-op instead of starting a new export.
     state.isStopping = true;
@@ -1274,6 +1344,43 @@ export default function (app: ServerAPI): SignalKPlugin {
           },
         },
       },
+      archiveMode: {
+        type: 'string',
+        title: 'Archive role',
+        enum: ['local', 'producer', 'replica'],
+        enumNames: [
+          'Local capture (legacy)',
+          'S3 authoritative producer',
+          'S3-only replica (no Signal K capture)',
+        ],
+        default: 'local',
+        description:
+          'For the same endpoint + bucket + prefix, configure exactly one producer; configure every other server as replica. An atomic producer record prevents accidental competing producers. Requires History Sync plugin installed. Replica history is eventually consistent and alerts while stale.',
+      },
+      archiveSource: {
+        type: 'string',
+        title: 'Shared archive source ID',
+        description:
+          'Stable letters/digits/dashes identifier; use the same value on producer and replicas.',
+      },
+      archiveCoverageStart: {
+        type: 'string',
+        title: 'Replica expected coverage start (YYYY-MM-DD UTC)',
+        description:
+          'Missing periods since this date trigger an alert. Replicas never capture Signal K or upload files.',
+      },
+      archiveWarningHours: {
+        type: 'number',
+        minimum: 0.01,
+        default: 24,
+        title: 'Replica warning after hours of missing/stale coverage',
+      },
+      archiveAlarmHours: {
+        type: 'number',
+        minimum: 0.01,
+        default: 72,
+        title: 'Replica alarm after hours of missing/stale coverage',
+      },
       cloudUpload: {
         type: 'object',
         title: 'Cloud Storage Configuration',
@@ -1418,6 +1525,34 @@ export default function (app: ServerAPI): SignalKPlugin {
 
   // Webapp static files and API routes
   plugin.registerWithRouter = function (router: Router): void {
+    router.get('/api/archive-status', (_req, res) =>
+      res.json(
+        archive?.status || {
+          mode: 'local',
+          advice:
+            'Use one producer per endpoint, bucket and prefix; use replica on other servers.',
+        }
+      )
+    );
+    router.use((req, res, next) => {
+      if (archiveMode === 'replica' && req.path.startsWith('/api/'))
+        return res.status(409).json({
+          error: 'REPLICA_READ_ONLY',
+          advice:
+            'This instance reads verified S3 history only. Use the Signal K History API and archive-status.',
+        });
+      if (
+        archiveMode === 'producer' &&
+        req.method !== 'GET' &&
+        req.path.startsWith('/api/')
+      )
+        return res.status(409).json({
+          error: 'MANAGED_ARCHIVE',
+          advice:
+            'Managed producer publishing runs after completed-day export. Configure this mode in Signal K plugin settings.',
+        });
+      return next();
+    });
     registerApiRoutes(router, state, app);
   };
 

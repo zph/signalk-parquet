@@ -1638,3 +1638,36 @@ For new features, open an issue first to discuss the approach with the maintaine
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for complete version history.
+
+### Shared S3 archive: producer and replica roles
+
+Install `signalk-history-sync` alongside Parquet to use the new **Archive role**
+setting. Keep **Local capture (legacy)** for existing standalone installations.
+For a shared endpoint **and bucket and prefix**, choose exactly one **S3
+authoritative producer** and configure all other instances as **S3-only replicas**.
+Use the same stable **Shared archive source ID** on both sides.
+
+The producer claims an atomic S3 owner record and publishes completed raw-day
+manifests after export. Conflicting producers are refused with advice to use replica
+mode; there is no automatic takeover. Previously claimed producers keep collecting
+locally while offline, but must verify ownership again before publishing. Managed
+mode disables deletion after upload and the legacy webapp mutation endpoints.
+
+A replica never subscribes to live Signal K, creates an ingestion buffer, imports
+local data, aggregates, uploads, or runs local retention. It reconciles verified
+S3 snapshots and serves them through the official Signal K History API. Each query
+pins one immutable Hive snapshot. Configure **Replica expected coverage start**
+as a UTC date so a missing earlier period cannot be hidden by recent files.
+Warning/alarm lag defaults are 24/72 hours and use normal Signal K notifications.
+
+This is eventual consistency with the published source archive. While offline,
+replicas retain verified local history and alert about stale or missing coverage.
+An incomplete upload, bad checksum, or older/conflicting generation cannot displace
+verified history. Producer manifests establish archive consistency, not proof that
+every physical sensor update was captured. Initial legacy S3 files without a
+manifest are not silently treated as complete periods.
+
+The configuration schema and webapp notice explain mode selection. Replica status
+is at `/plugins/signalk-parquet/api/archive-status`; source-only webapp tools are
+unavailable in replica mode. Use the regular Signal K plugin settings to change the
+role. LocalStack tests use dummy credentials; real S3 keys are not needed for tests.

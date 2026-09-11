@@ -44,6 +44,11 @@ export interface AutoDiscoveryConfig {
 }
 
 export interface PluginConfig {
+  archiveMode?: 'local' | 'producer' | 'replica';
+  archiveSource?: string;
+  archiveCoverageStart?: string;
+  archiveWarningHours?: number;
+  archiveAlarmHours?: number;
   bufferSize: number;
   saveIntervalSeconds: number;
   outputDirectory: string;

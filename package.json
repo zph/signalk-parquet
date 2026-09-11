@@ -138,5 +138,13 @@
     "tsconfig.json",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "peerDependencies": {
+    "signalk-history-sync": "^0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "signalk-history-sync": {
+      "optional": true
+    }
+  }
 }
