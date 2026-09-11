@@ -6,6 +6,44 @@
 
 Vessel data Parquet file archive with automated value and geospatial triggers. History API compliant with cloud backups and queries.
 
+<details>
+<summary><strong>How this fork differs from upstream</strong></summary>
+
+This repository is a fork of Maurice Tamman's
+[SignalK Parquet Data Store](https://github.com/motamman/signalk-parquet). Thank you to Maurice and
+the upstream contributors for the comprehensive history, storage, query, and management foundation.
+
+I am happy to upstream changes that prove useful beyond this fork. I have been iterating here first
+to learn which ideas hold up and what shape makes sense before proposing them upstream.
+
+This inventory compares the fork with its GitHub parent at
+[`main` commit `400d29d`](https://github.com/motamman/signalk-parquet/commit/400d29db282f7b98e4efd023db13d99f16238f4a).
+The fork change began after
+[`6df9bf1`](https://github.com/motamman/signalk-parquet/commit/6df9bf160f816bd3b62c4a37cb60af751d4736e1),
+and upstream has continued to advance independently.
+
+## Major features and changes
+
+| Difference | Commits |
+| --- | --- |
+| Raw-tier Parquet files use Snappy compression by default, with an explicit uncompressed compatibility and diagnostics option | `7d062c0` |
+| The selected codec applies to inferred schemas and repaired schemas while existing compressed and uncompressed files remain readable together without migration | `7d062c0` |
+
+## UI improvements
+
+| Difference | Commits |
+| --- | --- |
+| Signal K plugin configuration exposes Raw Parquet Compression with recommended Snappy and Uncompressed choices | `7d062c0` |
+
+## Performance and storage optimizations
+
+| Difference | Commits |
+| --- | --- |
+| Representative boat data measured about 87 percent smaller with Snappy, substantially reducing the raw archive that dominates long-term storage | `7d062c0` |
+| Compression preserves fast reads and writes and leaves JSON, CSV, and already-compressed aggregate tiers unchanged | `7d062c0` |
+
+</details>
+
 ## Features
 
 ### Core Data Management
