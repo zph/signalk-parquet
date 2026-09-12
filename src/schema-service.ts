@@ -1,7 +1,7 @@
 import * as fs from 'fs-extra';
 import * as path from 'path';
 import { ServerAPI } from '@signalk/server-api';
-import { DataRecord } from './types';
+import { DataRecord, ParquetCompression } from './types';
 
 // Import parquet dynamically
 let parquet: any;
@@ -15,6 +15,7 @@ try {
 interface ParquetField {
   type: string;
   optional: boolean;
+  compression: ParquetCompression;
 }
 
 export interface SchemaDetectionResult {
@@ -43,9 +44,14 @@ export interface RepairResult {
  */
 export class SchemaService {
   private app: ServerAPI;
+  private compression: ParquetCompression;
 
-  constructor(app: ServerAPI) {
+  constructor(
+    app: ServerAPI,
+    compression: ParquetCompression = ParquetCompression.SNAPPY
+  ) {
     this.app = app;
+    this.compression = compression;
   }
 
   /**
@@ -119,7 +125,11 @@ export class SchemaService {
         this.app?.debug(
           `  ⏰ ${colName}: Forced to UTF8 (timestamp/meta/source/context/path rule)`
         );
-        schemaFields[colName] = { type: 'UTF8', optional: true };
+        schemaFields[colName] = {
+          type: 'UTF8',
+          optional: true,
+          compression: this.compression,
+        };
         continue;
       }
 
@@ -136,7 +146,11 @@ export class SchemaService {
       const hasBigInts = values.some(v => typeof v === 'bigint');
       if (hasBigInts) {
         this.app?.debug(`  ✅ ${colName}: DOUBLE (BIGINT converted to DOUBLE)`);
-        schemaFields[colName] = { type: 'DOUBLE', optional: true };
+        schemaFields[colName] = {
+          type: 'DOUBLE',
+          optional: true,
+          compression: this.compression,
+        };
         continue;
       }
 
@@ -220,7 +234,11 @@ export class SchemaService {
         }
       }
 
-      schemaFields[colName] = { type: schemaType, optional: true };
+      schemaFields[colName] = {
+        type: schemaType,
+        optional: true,
+        compression: this.compression,
+      };
     }
 
     const finalSchema = new parquet.ParquetSchema(schemaFields);

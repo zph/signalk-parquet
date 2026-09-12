@@ -64,6 +64,7 @@ export interface PluginConfig {
   // re-enters the legacy default in the UI keeps it on next start).
   configSchemaVersion?: number;
   fileFormat: 'json' | 'csv' | 'parquet';
+  parquetCompression: ParquetCompression;
   vesselMMSI: string;
   cloudUpload: CloudUploadConfig;
   claudeIntegration?: ClaudeIntegrationConfig;
@@ -317,6 +318,7 @@ export interface DataRecord {
 export interface ParquetWriterOptions {
   format: 'json' | 'csv' | 'parquet';
   app?: ServerAPI;
+  compression?: ParquetCompression;
 }
 
 // File System Related
@@ -737,6 +739,10 @@ export enum CommandStatus {
 
 // Utility Types
 export type FileFormat = 'json' | 'csv' | 'parquet';
+export enum ParquetCompression {
+  SNAPPY = 'SNAPPY',
+  UNCOMPRESSED = 'UNCOMPRESSED',
+}
 export type UploadTiming = 'realtime' | 'consolidation';
 export type BufferKey = string; // Format: "context:path"
 
@@ -765,6 +771,7 @@ export interface ParquetField {
   type: string;
   optional?: boolean;
   repeated?: boolean;
+  compression?: ParquetCompression;
 }
 
 export interface ParquetSchema {

@@ -11,7 +11,13 @@ import {
   recoverStrandedCompactionTrash,
 } from './services/compaction-service';
 import { CACHE_SIZE } from './config/cache-defaults';
-import { SignalKPlugin, PluginConfig, PluginState, PathConfig } from './types';
+import {
+  SignalKPlugin,
+  PluginConfig,
+  PluginState,
+  PathConfig,
+  ParquetCompression,
+} from './types';
 import { Context, SourceRef, Timestamp, Path } from '@signalk/server-api';
 import {
   loadWebAppConfig,
@@ -292,6 +298,10 @@ export default function (app: ServerAPI): SignalKPlugin {
       ),
       configSchemaVersion: 1,
       fileFormat: options?.fileFormat || 'parquet',
+      parquetCompression:
+        options?.parquetCompression === ParquetCompression.UNCOMPRESSED
+          ? ParquetCompression.UNCOMPRESSED
+          : ParquetCompression.SNAPPY,
       vesselMMSI: vesselMMSI,
       cloudUpload: (() => {
         // New config format already present
@@ -374,6 +384,7 @@ export default function (app: ServerAPI): SignalKPlugin {
     state.parquetWriter = new ParquetWriter({
       format: state.currentConfig.fileFormat,
       app: app,
+      compression: state.currentConfig.parquetCompression,
     });
 
     // Initialize SQLite buffer if enabled
@@ -1172,6 +1183,15 @@ export default function (app: ServerAPI): SignalKPlugin {
         description:
           'Prefix added to all generated Parquet files. Useful if running multiple instances or for organizing data. Example: "boat_name" produces "boat_name_2024-01-15T1200.parquet"',
         default: 'signalk_data',
+      },
+      parquetCompression: {
+        type: 'string',
+        title: 'Raw Parquet Compression',
+        description:
+          'Compression for raw-tier Parquet files. Snappy is recommended for substantially lower storage use with fast reads and writes. Existing uncompressed files remain readable alongside compressed files. Aggregated tiers already use Snappy.',
+        enum: Object.values(ParquetCompression),
+        enumNames: ['Snappy (recommended)', 'Uncompressed'],
+        default: ParquetCompression.SNAPPY,
       },
       retentionDays: {
         type: 'integer',

@@ -17,6 +17,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs-extra';
 import type { ServerAPI } from '@signalk/server-api';
+import { ParquetCompression } from '../../../src/types';
 
 /** A single registered streambundle handler for one bus (path). */
 interface BusHandler {
@@ -232,6 +233,7 @@ export function makeTestConfig(
     filenamePrefix: 'signalk_data',
     retentionDays: 0,
     fileFormat: 'parquet' as const,
+    parquetCompression: ParquetCompression.SNAPPY,
     vesselMMSI: '368204530',
     cloudUpload: { provider: 'none' as const },
     homePortLatitude: 0,

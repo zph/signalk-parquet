@@ -1,6 +1,11 @@
 import * as fs from 'fs-extra';
 import * as path from 'path';
-import { DataRecord, ParquetWriterOptions, FileFormat } from './types';
+import {
+  DataRecord,
+  ParquetWriterOptions,
+  FileFormat,
+  ParquetCompression,
+} from './types';
 import { ServerAPI } from '@signalk/server-api';
 import { SchemaService } from './schema-service';
 
@@ -25,7 +30,10 @@ export class ParquetWriter {
 
     // Initialize schema service if app is available
     if (this.app) {
-      this.schemaService = new SchemaService(this.app);
+      this.schemaService = new SchemaService(
+        this.app,
+        options.compression ?? ParquetCompression.SNAPPY
+      );
     }
   }
 

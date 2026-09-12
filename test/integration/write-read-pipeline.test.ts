@@ -25,6 +25,7 @@ import {
 import { HivePathBuilder } from '../../src/utils/hive-path-builder';
 import { createFakeSignalK, FakeSignalK } from './helpers/fake-signalk';
 import { makeScalarRecord, makePositionRecord } from './helpers/records';
+import { ParquetCompression, ParquetField } from '../../src/types';
 
 // A fixed historical day so export (which excludes "today") always includes it
 // and the assertions never depend on the wall clock.
@@ -82,6 +83,59 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
     await DuckDBPool.shutdown();
     if (buffer?.isOpen()) buffer.close();
     await host?.cleanup();
+  });
+
+  it('writes Snappy raw files by default and reads them with uncompressed files', async () => {
+    const records = Array.from({ length: 1000 }, (_, index) =>
+      scalarRecord(
+        'navigation.speedOverGround',
+        index % 20,
+        new Date(DAY.getTime() + index * 1000).toISOString()
+      )
+    );
+    const snappyPath = path.join(host.dataDir, 'snappy.parquet');
+    const uncompressedPath = path.join(host.dataDir, 'uncompressed.parquet');
+    const snappyWriter = new ParquetWriter({
+      format: 'parquet',
+      app: host.app,
+    });
+    const uncompressedWriter = new ParquetWriter({
+      format: 'parquet',
+      app: host.app,
+      compression: ParquetCompression.UNCOMPRESSED,
+    });
+
+    const snappySchema = await snappyWriter.createParquetSchema(records);
+    const uncompressedSchema =
+      await uncompressedWriter.createParquetSchema(records);
+    expect(
+      Object.values(
+        snappySchema.fields as Record<string, ParquetField>
+      ).every(field => field.compression === ParquetCompression.SNAPPY)
+    ).to.equal(true);
+    expect(
+      Object.values(
+        uncompressedSchema.fields as Record<string, ParquetField>
+      ).every(field => field.compression === ParquetCompression.UNCOMPRESSED)
+    ).to.equal(true);
+
+    await snappyWriter.writeRecords(snappyPath, records);
+    await uncompressedWriter.writeRecords(uncompressedPath, records);
+
+    const conn = await DuckDBPool.getConnection();
+    try {
+      const res = await conn.runAndReadAll(
+        `SELECT COUNT(*) AS n
+         FROM read_parquet(['${toGlob(snappyPath)}', '${toGlob(uncompressedPath)}'])`
+      );
+      const row = res.getRowObjects()[0] as { n: bigint };
+      expect(Number(row.n)).to.equal(records.length * 2);
+      expect((await fs.stat(snappyPath)).size).to.be.lessThan(
+        (await fs.stat(uncompressedPath)).size
+      );
+    } finally {
+      conn.disconnectSync();
+    }
   });
 
   it('exports buffered scalar records to a Hive-partitioned parquet tree', async () => {

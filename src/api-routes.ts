@@ -32,6 +32,7 @@ import {
   ClaudeConnectionTestResponse,
   ValidationApiResponse,
   ValidationViolation,
+  ParquetCompression,
 } from './types';
 import {
   ProcessType,
@@ -3337,7 +3338,13 @@ export function registerApiRoutes(
               await reader.close();
               // eslint-disable-next-line @typescript-eslint/no-require-imports
               const { ParquetWriter } = require('./parquet-writer');
-              const writer = new ParquetWriter({ format: 'parquet', app });
+              const writer = new ParquetWriter({
+                format: 'parquet',
+                app,
+                compression:
+                  state.currentConfig?.parquetCompression ??
+                  ParquetCompression.SNAPPY,
+              });
               const correctedSchema = await writer.createParquetSchema(
                 records,
                 signalkPath
