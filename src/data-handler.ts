@@ -493,14 +493,17 @@ function snapshotVesselValues(app: ServerAPI): CapturedValue[] {
           typeof node.timestamp === 'string' ? node.timestamp : undefined,
         $source: typeof node.$source === 'string' ? node.$source : undefined,
       });
-      return;
     }
     if (prefix && 'latitude' in node && 'longitude' in node) {
       records.push({ context, path: prefix, value: node });
       return;
     }
     for (const [key, child] of Object.entries(node)) {
-      if (['meta', 'values', '$source', 'timestamp', 'source'].includes(key))
+      if (
+        ['value', 'meta', 'values', '$source', 'timestamp', 'source'].includes(
+          key
+        )
+      )
         continue;
       walk(context, child, prefix ? `${prefix}.${key}` : key);
     }
@@ -518,6 +521,10 @@ export function updateDataSubscriptions(
   config: PluginConfig,
   app: ServerAPI
 ): void {
+  if (state.captureAllReconcileInterval) {
+    clearInterval(state.captureAllReconcileInterval);
+    state.captureAllReconcileInterval = undefined;
+  }
   // First, unsubscribe from all existing subscriptions
   state.unsubscribes.forEach(unsubscribe => {
     if (typeof unsubscribe === 'function') {
@@ -546,8 +553,9 @@ export function updateDataSubscriptions(
   ) {
     const discovery = config.autoDiscovery;
     const bootstrapSeen = new Set<string>();
+    const lastCapturedValue = new Map<string, string>();
     let bootstrapping = true;
-    const capture = (delta: CapturedValue): void => {
+    const capture = (delta: CapturedValue, cached = false): void => {
       if (!delta.path) return;
       if (
         discovery.excludePatterns?.some(pattern =>
@@ -559,6 +567,9 @@ export function updateDataSubscriptions(
           ))
       )
         return;
+      const pathKey = `${delta.context}\0${delta.path}`;
+      const version = `${delta.timestamp || ''}\0${delta.$source || ''}\0${JSON.stringify(delta.value)}`;
+      if (cached && lastCapturedValue.get(pathKey) === version) return;
       const key = `${delta.context}\0${delta.path}\0${delta.timestamp || ''}\0${delta.$source || ''}`;
       if (bootstrapping) {
         if (bootstrapSeen.has(key)) return;
@@ -571,6 +582,7 @@ export function updateDataSubscriptions(
         state,
         app
       );
+      lastCapturedValue.set(pathKey, version);
       state.subscribedPaths.add(delta.path);
     };
     app.subscriptionmanager.subscribe(
@@ -605,14 +617,28 @@ export function updateDataSubscriptions(
         }
       }
     );
+    const reconcileCachedModel = (): void => {
+      try {
+        for (const cached of snapshotVesselValues(app)) capture(cached, true);
+      } catch (error) {
+        app.error(
+          `[CaptureAll] Cached-model snapshot failed: ${String(error)}`
+        );
+      }
+    };
     try {
-      for (const cached of snapshotVesselValues(app)) capture(cached);
-    } catch (error) {
-      app.error(`[CaptureAll] Cached-model snapshot failed: ${String(error)}`);
+      reconcileCachedModel();
     } finally {
       bootstrapping = false;
       bootstrapSeen.clear();
     }
+    // Some plugins populate the full model without emitting a wildcard delta.
+    // Reconcile those late static paths without writing duplicates each minute.
+    state.captureAllReconcileInterval = setInterval(
+      reconcileCachedModel,
+      60_000
+    );
+    state.captureAllReconcileInterval.unref();
     return;
   }
 
@@ -794,6 +820,13 @@ function handleStreamData(
   app: ServerAPI
 ): void {
   try {
+    const receivedTimestamp = new Date().toISOString();
+    const signalKTimestamp = normalizedDelta.timestamp;
+    const validTimestamp =
+      typeof signalKTimestamp === 'string' &&
+      Number.isFinite(Date.parse(signalKTimestamp))
+        ? signalKTimestamp
+        : receivedTimestamp;
     // Retrieve metadata for this path
     let metadata: object | undefined;
     try {
@@ -807,8 +840,8 @@ function handleStreamData(
     }
 
     const record: DataRecord = {
-      received_timestamp: new Date().toISOString(),
-      signalk_timestamp: normalizedDelta.timestamp || new Date().toISOString(),
+      received_timestamp: receivedTimestamp,
+      signalk_timestamp: validTimestamp,
       context: normalizedDelta.context || pathConfig.context || 'vessels.self',
       path: normalizedDelta.path,
       value: null,

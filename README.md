@@ -247,9 +247,9 @@ npm run migrate:ais-shared -- /path/to/signalk-parquet --apply
 ```
 
 The apply step stages ZSTD-3 files, verifies row counts and exact row content,
-publishes the shared partition, then moves old per-vessel directories to a
-recoverable `.ais-per-vessel-backup-*` directory. Readers use only the shared
-layout after upgrading; there is no old-layout fallback. Run
+publishes the shared partition, then permanently deletes old per-vessel
+directories. Readers use only the shared layout after upgrading; there is no
+old-layout fallback. Run
 `npm run benchmark:ais-shared -- /path/to/signalk-parquet` on an old-layout
 snapshot before migrating to compare file size and count-query latency.
 

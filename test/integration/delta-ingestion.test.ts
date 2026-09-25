@@ -151,6 +151,8 @@ describe('delta ingestion and regimen control', () => {
     // Guard each resource: if beforeEach failed partway, these may be unset,
     // and an unguarded teardown throw would mask the real setup error.
     unfreezeClock();
+    if (state?.captureAllReconcileInterval)
+      clearInterval(state.captureAllReconcileInterval);
     if (buffer?.isOpen()) buffer.close();
     await host?.cleanup();
   });
@@ -244,6 +246,32 @@ describe('delta ingestion and regimen control', () => {
     expect(buffer.getStats().pendingRecords).to.equal(2);
   });
 
+  it('normalizes malformed Signal K timestamps instead of dropping a live path', () => {
+    config.autoDiscovery = {
+      enabled: true,
+      captureAllLivePaths: true,
+      requireLiveData: false,
+      excludePatterns: [],
+    };
+    updateDataSubscriptions([], state, config, host.app);
+    host.emitCommand({
+      context: 'vessels.test-self',
+      updates: [
+        {
+          timestamp: { unexpected: true } as unknown as string,
+          values: [{ path: 'navigation.state', value: 'sailing' }],
+        },
+      ],
+    });
+    const rows = buffer.getRecordsForPathAndDate(
+      'vessels.test-self',
+      'navigation.state',
+      frozenDay()
+    );
+    expect(rows).to.have.lengthOf(1);
+    expect(rows[0].signalk_timestamp).to.equal(FROZEN_NOW.toISOString());
+  });
+
   it('captures cached static paths, root leaves, and paths introduced after subscription', async () => {
     buffer.close();
     await host.cleanup();
@@ -316,6 +344,52 @@ describe('delta ingestion and regimen control', () => {
       expect(buffer.getKnownPaths().has(path), path).to.equal(true);
     }
     expect(buffer.getStats().pendingRecords).to.equal(6);
+  });
+
+  it('reconciles late full-model paths without repeatedly buffering unchanged values', async () => {
+    const vesselsModel: Record<string, unknown> = { 'test-self': {} };
+    buffer.close();
+    await host.cleanup();
+    host = createFakeSignalK({ vesselsModel });
+    buffer = new SQLiteBuffer({ dbPath: path.join(host.dataDir, 'buffer.db') });
+    config = makeTestConfig(host.dataDir);
+    state = makeState(buffer, config);
+    config.autoDiscovery = {
+      enabled: true,
+      captureAllLivePaths: true,
+      requireLiveData: false,
+      excludePatterns: [],
+    };
+    const originalSetInterval = globalThis.setInterval;
+    let reconcile: (() => void) | undefined;
+    const fakeTimer = { unref: () => fakeTimer } as NodeJS.Timeout;
+    globalThis.setInterval = ((callback: () => void) => {
+      reconcile = callback;
+      return fakeTimer;
+    }) as typeof setInterval;
+    try {
+      updateDataSubscriptions([], state, config, host.app);
+    } finally {
+      globalThis.setInterval = originalSetInterval;
+    }
+    vesselsModel['test-self'] = {
+      commands: {
+        captureMoored: {
+          value: true,
+          timestamp: NOW,
+          auto: { value: false, timestamp: NOW },
+        },
+      },
+    };
+    expect(reconcile).not.to.equal(undefined);
+    reconcile!();
+    expect(buffer.getKnownPaths().has('commands.captureMoored.auto')).to.equal(
+      true
+    );
+    expect(buffer.getKnownPaths().has('commands.captureMoored')).to.equal(true);
+    expect(buffer.getStats().pendingRecords).to.equal(2);
+    reconcile!();
+    expect(buffer.getStats().pendingRecords).to.equal(2);
   });
 
   it('does not collect a regimen-gated path until its command turns on', () => {

@@ -645,6 +645,7 @@ export interface PluginState {
   activeRegimens: Set<string>;
   subscribedPaths: Set<string>;
   saveInterval?: NodeJS.Timeout;
+  captureAllReconcileInterval?: NodeJS.Timeout;
   consolidationInterval?: NodeJS.Timeout;
   // One-shot timers armed in start(); tracked so stop() can cancel work
   // that hasn't fired yet.

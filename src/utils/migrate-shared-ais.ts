@@ -13,15 +13,15 @@ export interface SharedAisMigrationSummary {
   sharedFiles: number;
   sharedBytes: number;
   rows: number;
-  backupDirectory: string | null;
+  deletedSourceFiles: number;
 }
 
 const quote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
 
 /**
  * One-way layout migration. Stage and verify every path/day before publishing
- * the shared partition. Old vessel directories move to a recoverable backup
- * only after the shared partition is complete. Run with ingestion stopped.
+ * the shared partition. Old vessel directories are deleted only after the
+ * shared partition is complete. Run with ingestion stopped.
  */
 export async function migrateSharedAis(
   directory: string,
@@ -60,7 +60,7 @@ export async function migrateSharedAis(
     sharedFiles: groups.size,
     sharedBytes: 0,
     rows: 0,
-    backupDirectory: null,
+    deletedSourceFiles: 0,
   };
   if (!apply || sourceFiles.length === 0) return summary;
   if (
@@ -121,16 +121,11 @@ export async function migrateSharedAis(
     lease.assertHeld();
     await fs.rename(stageDir, sharedDir);
     published = true;
-    const backupDir = path.join(root, `.ais-per-vessel-backup-${Date.now()}`);
-    await fs.mkdir(backupDir);
     for (const context of contexts) {
       lease.assertHeld();
-      await fs.rename(
-        path.join(rawDir, context),
-        path.join(backupDir, context)
-      );
+      await fs.rm(path.join(rawDir, context), { recursive: true });
     }
-    summary.backupDirectory = backupDir;
+    summary.deletedSourceFiles = sourceFiles.length;
     return summary;
   } finally {
     connection.disconnectSync();

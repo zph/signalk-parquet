@@ -1050,6 +1050,10 @@ export default function (app: ServerAPI): SignalKPlugin {
     if (state.saveInterval) {
       clearInterval(state.saveInterval);
     }
+    if (state.captureAllReconcileInterval) {
+      clearInterval(state.captureAllReconcileInterval);
+      state.captureAllReconcileInterval = undefined;
+    }
     if (state.consolidationInterval) {
       clearInterval(state.consolidationInterval);
     }

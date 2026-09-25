@@ -267,7 +267,7 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
     expect(buffer.getStats().pendingRecords).to.equal(1);
   });
 
-  it('migrates old AIS files into one verified shared ZSTD file and preserves a recoverable backup', async () => {
+  it('migrates old AIS files into one verified shared ZSTD file and deletes originals', async () => {
     const writer = new ParquetWriter({ format: 'parquet', app: host.app });
     const contexts = [
       'vessels.urn:mrn:imo:mmsi:123456789',
@@ -299,7 +299,22 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
     expect(result.sourceFiles).to.equal(2);
     expect(result.sharedFiles).to.equal(1);
     expect(result.rows).to.equal(2);
-    expect(result.backupDirectory).to.be.a('string');
+    expect(result.deletedSourceFiles).to.equal(2);
+    for (const context of contexts) {
+      const oldDirectory = hive.buildPath(
+        host.dataDir,
+        'raw',
+        context,
+        'navigation.position',
+        DAY
+      );
+      expect(
+        await fs.stat(oldDirectory).then(
+          () => true,
+          () => false
+        )
+      ).to.equal(false);
+    }
     const shared = path.join(
       host.dataDir,
       'tier=raw',
