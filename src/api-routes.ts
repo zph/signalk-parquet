@@ -71,6 +71,7 @@ import {
   updatePluginConfig,
 } from './commands';
 import { updateDataSubscriptions } from './data-handler';
+import { getSQLiteBytes } from './utils/storage-growth';
 import { toContextFilePath, toParquetFilePath } from './utils/path-helpers';
 import { newJobId } from './utils/job-id';
 import { ServerAPI, Context } from '@signalk/server-api';
@@ -3461,20 +3462,23 @@ export function registerApiRoutes(
     try {
       const dataDir = state.getDataDirPath();
       const hiveBuilder = new HivePathBuilder();
-      const tiers: Array<{ tier: string; fileCount: number }> = [];
+      const tiers: Array<{ tier: string; fileCount: number; bytes: number }> =
+        [];
       const contexts: Array<{
         name: string;
         pathCount: number;
         fileCount: number;
       }> = [];
       let totalFiles = 0;
+      let totalParquetBytes = 0;
       let totalPaths = 0;
       let earliestDate: Date | null = null;
       let latestDate: Date | null = null;
 
       // Helper to count parquet files recursively
-      const countFiles = (dir: string): number => {
+      const countFiles = (dir: string): { count: number; bytes: number } => {
         let count = 0;
+        let bytes = 0;
         try {
           const items = fs.readdirSync(dir);
           for (const item of items) {
@@ -3486,16 +3490,19 @@ export function registerApiRoutes(
                   item
                 )
               ) {
-                count += countFiles(fullPath);
+                const nested = countFiles(fullPath);
+                count += nested.count;
+                bytes += nested.bytes;
               }
             } else if (item.endsWith('.parquet')) {
               count++;
+              bytes += stat.size;
             }
           }
         } catch {
           // skip unreadable dirs
         }
-        return count;
+        return { count, bytes };
       };
 
       // Helper to find earliest/latest year+day in a path directory
@@ -3552,6 +3559,9 @@ export function registerApiRoutes(
 
       // Scan all tiers
       const tierNames = ['raw', '5s', '60s', '1h'];
+      const sqliteBytes = state.sqliteBuffer
+        ? getSQLiteBytes(state.sqliteBuffer.getDbPath())
+        : 0;
       const contextMap = new Map<
         string,
         { pathCount: number; fileCount: number }
@@ -3560,9 +3570,10 @@ export function registerApiRoutes(
       for (const tierName of tierNames) {
         const tierDir = path.join(dataDir, `tier=${tierName}`);
         let tierFileCount = 0;
+        let tierBytes = 0;
 
         if (!fs.existsSync(tierDir)) {
-          tiers.push({ tier: tierName, fileCount: 0 });
+          tiers.push({ tier: tierName, fileCount: 0, bytes: 0 });
           continue;
         }
 
@@ -3584,10 +3595,12 @@ export function registerApiRoutes(
 
           for (const pathDir of pathDirs) {
             const pathFullPath = path.join(ctxFullPath, pathDir);
-            const fileCount = countFiles(pathFullPath);
+            const fileStats = countFiles(pathFullPath);
+            const fileCount = fileStats.count;
             if (fileCount > 0) {
               ctxPaths.add(pathDir);
               ctxFileCount += fileCount;
+              tierBytes += fileStats.bytes;
 
               // Scan date range (only on raw tier for efficiency)
               if (tierName === 'raw') {
@@ -3626,9 +3639,19 @@ export function registerApiRoutes(
           }
         }
 
-        tiers.push({ tier: tierName, fileCount: tierFileCount });
+        tiers.push({
+          tier: tierName,
+          fileCount: tierFileCount,
+          bytes: tierBytes,
+        });
         totalFiles += tierFileCount;
+        totalParquetBytes += tierBytes;
       }
+
+      const growth = await state.storageGrowthTracker?.sample(
+        sqliteBytes,
+        totalParquetBytes
+      );
 
       // Build contexts array and totals
       for (const [name, data] of contextMap) {
@@ -3647,6 +3670,10 @@ export function registerApiRoutes(
           totalContexts: contexts.length,
           totalPaths,
           totalFiles,
+          totalParquetBytes,
+          sqliteBytes,
+          trackedBytes: totalParquetBytes + sqliteBytes,
+          growth: growth || null,
           earliestDate: earliestDate ? earliestDate.toISOString() : null,
           latestDate: latestDate ? latestDate.toISOString() : null,
           contexts,
@@ -3685,6 +3712,7 @@ export function registerApiRoutes(
         success: true,
         enabled: true,
         stats,
+        retentionHours: state.currentConfig?.bufferRetentionHours ?? 6,
         exportService: exportStatus,
       });
     } catch (error) {

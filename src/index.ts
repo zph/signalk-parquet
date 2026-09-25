@@ -62,6 +62,11 @@ import {
   validatePathRetentionRules,
 } from './utils/retention-rules';
 import { AutoDiscoveryService } from './services/auto-discovery';
+import {
+  getParquetBytes,
+  getSQLiteBytes,
+  StorageGrowthTracker,
+} from './utils/storage-growth';
 
 // How long plugin.stop() waits for an aggregation worker to finish its
 // in-flight COPY and exit after a cooperative shutdown request, before
@@ -468,6 +473,32 @@ export default function (app: ServerAPI): SignalKPlugin {
     ).catch(err => {
       app.error(`Compaction trash recovery failed: ${(err as Error).message}`);
     });
+
+    state.storageGrowthTracker = new StorageGrowthTracker(
+      state.currentConfig.outputDirectory
+    );
+    const recordStorageSample = async (): Promise<void> => {
+      if (state.isStopping || !state.storageGrowthTracker) return;
+      try {
+        const sqliteBytes = state.sqliteBuffer
+          ? getSQLiteBytes(state.sqliteBuffer.getDbPath())
+          : 0;
+        const parquetBytes = await getParquetBytes(
+          state.currentConfig!.outputDirectory
+        );
+        await state.storageGrowthTracker.sample(sqliteBytes, parquetBytes);
+      } catch (error) {
+        app.debug(
+          `[StorageStats] Could not record size sample: ${String(error)}`
+        );
+      }
+    };
+    void recordStorageSample();
+    state.storageGrowthInterval = setInterval(
+      () => void recordStorageSample(),
+      30 * 60 * 1000
+    );
+    state.storageGrowthInterval.unref();
 
     // Quarantine zero-byte parquet stubs left by a crash between
     // ParquetWriter.openFile() and close(). The read-path filename
@@ -1053,6 +1084,10 @@ export default function (app: ServerAPI): SignalKPlugin {
     if (state.captureAllReconcileInterval) {
       clearInterval(state.captureAllReconcileInterval);
       state.captureAllReconcileInterval = undefined;
+    }
+    if (state.storageGrowthInterval) {
+      clearInterval(state.storageGrowthInterval);
+      state.storageGrowthInterval = undefined;
     }
     if (state.consolidationInterval) {
       clearInterval(state.consolidationInterval);

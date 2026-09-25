@@ -646,6 +646,8 @@ export interface PluginState {
   subscribedPaths: Set<string>;
   saveInterval?: NodeJS.Timeout;
   captureAllReconcileInterval?: NodeJS.Timeout;
+  storageGrowthInterval?: NodeJS.Timeout;
+  storageGrowthTracker?: import('./utils/storage-growth').StorageGrowthTracker;
   consolidationInterval?: NodeJS.Timeout;
   // One-shot timers armed in start(); tracked so stop() can cancel work
   // that hasn't fired yet.

@@ -46,6 +46,8 @@ async function refreshBufferStatus() {
 
     const stats = data.stats;
     const exportStatus = data.exportService;
+    const retentionHours = data.retentionHours ?? 6;
+    const retentionLabel = `${retentionHours} ${retentionHours === 1 ? 'hour' : 'hours'}`;
 
     const formatBytes = bytes => {
       if (bytes < 1024) return `${bytes} B`;
@@ -60,19 +62,9 @@ async function refreshBufferStatus() {
       return `${d.toLocaleString()} (${utcTime} UTC)`;
     };
 
-    const formatUtcHourAsLocal = utcHour => {
-      const d = new Date();
-      d.setUTCHours(utcHour, 0, 0, 0);
-      const localTime = d.toLocaleTimeString([], {
-        hour: 'numeric',
-        minute: '2-digit',
-      });
-      return localTime;
-    };
-
     container.innerHTML = `
       <p style="color: #555; margin: 0 0 15px 0; font-size: 0.95em;">
-        Incoming SignalK data is buffered in SQLite, then exported to Parquet files on a daily schedule (or on restart). Exported records are retained for 48 hours as a safety net, then purged.</p>
+        Signal K data is exported to Parquet hourly after its row count is verified. Exported rows remain in SQLite for ${retentionLabel}, then are deleted. SQLite reuses freed space but does not shrink its database file automatically.</p>
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
         <div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
           <strong style="color: #FF9800;">Pending Export</strong><br>
@@ -82,7 +74,7 @@ async function refreshBufferStatus() {
         <div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
           <strong style="color: #4CAF50;">Exported</strong><br>
           <span style="font-size: 1.5em;">${stats.exportedRecords.toLocaleString()}</span>
-          <small style="display: block; color: #999; margin-top: 4px;">Written to Parquet, purged from SQLite after 48h</small>
+          <small style="display: block; color: #999; margin-top: 4px;">Written to Parquet, purged after ${retentionLabel}</small>
         </div>
         <div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
           <strong style="color: #1565C0;">Total Records</strong><br>
@@ -102,18 +94,22 @@ async function refreshBufferStatus() {
           ? `
       <div style="margin-top: 15px; padding: 10px; background: white; border-radius: 5px; border: 1px solid #ddd;">
         <strong>Export Service:</strong>
-        <span style="color: #4CAF50;">Daily Mode</span>
+        <span style="color: #4CAF50;">Hourly Mode</span>
         ${exportStatus.isExporting ? ' <span style="color: #FF9800;">(exporting...)</span>' : ''}
-        | <strong>Schedule:</strong> Daily at ${formatUtcHourAsLocal(exportStatus.dailyExportHour)} (${exportStatus.dailyExportHour}:00 UTC)
+        | <strong>Schedule:</strong> Each completed UTC hour
         <br>
         <strong>Last Export:</strong>
-        ${exportStatus.lastExportTime
-          ? `${formatTime(exportStatus.lastExportTime)}
+        ${
+          exportStatus.lastExportTime
+            ? `${formatTime(exportStatus.lastExportTime)}
              | <strong>Trigger:</strong> ${exportStatus.lastExportTrigger ? exportStatus.lastExportTrigger.charAt(0).toUpperCase() + exportStatus.lastExportTrigger.slice(1) : 'Unknown'}
-             | <strong>Result:</strong> ${exportStatus.lastBatchExported > 0
-               ? `<span style="color: #4CAF50;">${exportStatus.lastBatchExported.toLocaleString()} records exported</span>`
-               : '<span style="color: #999;">no pending records</span>'}`
-          : '<span style="color: #999;">none since restart</span>'}
+             | <strong>Result:</strong> ${
+               exportStatus.lastBatchExported > 0
+                 ? `<span style="color: #4CAF50;">${exportStatus.lastBatchExported.toLocaleString()} records exported</span>`
+                 : '<span style="color: #999;">no pending records</span>'
+             }`
+            : '<span style="color: #999;">none since restart</span>'
+        }
       </div>
       `
           : ''
@@ -373,10 +369,13 @@ function updateMigrationProgress(data) {
   if (data.phase === 'aggregation') {
     const aggDone = data.aggregationDatesProcessed || 0;
     const aggTotal = data.aggregationDatesTotal || 0;
-    const aggPercent = aggTotal > 0 ? Math.round((aggDone / aggTotal) * 100) : 0;
+    const aggPercent =
+      aggTotal > 0 ? Math.round((aggDone / aggTotal) * 100) : 0;
     progressBar.style.width = `${aggPercent}%`;
     progressText.textContent = `Building tiers: ${aggDone}/${aggTotal} dates (${aggPercent}%)`;
-    currentFile.textContent = data.aggregationCurrentDate ? `Current: ${data.aggregationCurrentDate}` : '';
+    currentFile.textContent = data.aggregationCurrentDate
+      ? `Current: ${data.aggregationCurrentDate}`
+      : '';
   } else {
     progressBar.style.width = `${data.percent}%`;
     progressText.textContent = `${data.percent}% complete (${data.processed}/${data.total} files)`;
@@ -444,14 +443,24 @@ async function refreshStoreStats() {
     }
 
     const stats = data.stats;
-
-    if (stats.totalFiles === 0) {
-      container.innerHTML = `
-        <p style="color: #666;">No Parquet files found in the data store.</p>
-        <p><small>Data will appear here once the plugin starts collecting and exporting data.</small></p>
-      `;
-      return;
-    }
+    const formatBytes = bytes => {
+      if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const index = Math.min(
+        Math.floor(Math.log(bytes) / Math.log(1024)),
+        units.length - 1
+      );
+      return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
+    };
+    const growth = stats.growth;
+    const rateLine = (bytesPerDay, prefix) => {
+      if (!Number.isFinite(bytesPerDay)) return `${prefix}: —`;
+      const direction = bytesPerDay < 0 ? 'shrinking' : 'growing';
+      return `${prefix}: ${formatBytes(Math.abs(bytesPerDay))}/day ${direction}`;
+    };
+    const growthSummary = growth?.available
+      ? `<strong>Estimated net growth:</strong> ${rateLine(growth.sqliteBytesPerDay, 'SQLite')} · ${rateLine(growth.parquetBytesPerDay, 'Parquet')} · ${rateLine(growth.totalBytesPerDay, 'combined')}<br><small>Median of sample-to-sample size changes from measurements spanning ${growth.windowHours.toFixed(1)} hours (${growth.sampleCount} samples), scaled to one day. This is a projection, not a quota forecast.</small>`
+      : `<strong>Growth estimate:</strong> collecting a baseline (${growth?.sampleCount || 0} samples). An estimate appears after at least 2.5 hours of measurements.`;
 
     // Build context rows
     const contextRows = stats.contexts
@@ -473,6 +482,7 @@ async function refreshStoreStats() {
       <tr>
         <td style="font-family: monospace;">${t.tier}</td>
         <td style="text-align: right;">${t.fileCount.toLocaleString()}</td>
+        <td style="text-align: right;">${formatBytes(t.bytes)}</td>
       </tr>
     `
       )
@@ -484,6 +494,27 @@ async function refreshStoreStats() {
     };
 
     container.innerHTML = `
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 15px; margin-bottom: 15px;">
+        <div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
+          <strong style="color: #1565C0;">SQLite on disk</strong><br>
+          <span style="font-size: 1.5em;">${formatBytes(stats.sqliteBytes)}</span>
+          <small style="display: block; color: #777;">DB + WAL + SHM</small>
+        </div>
+        <div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
+          <strong style="color: #2e7d32;">Parquet on disk</strong><br>
+          <span style="font-size: 1.5em;">${formatBytes(stats.totalParquetBytes)}</span>
+          <small style="display: block; color: #777;">${stats.totalFiles.toLocaleString()} files across all tiers</small>
+        </div>
+        <div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
+          <strong style="color: #333;">Tracked total</strong><br>
+          <span style="font-size: 1.5em;">${formatBytes(stats.trackedBytes)}</span>
+          <small style="display: block; color: #777;">SQLite + Parquet</small>
+        </div>
+      </div>
+      <div style="padding: 12px 15px; margin-bottom: 15px; background: #f7f9fb; border: 1px solid #d8e0e8; border-radius: 5px; line-height: 1.6;">
+        ${growthSummary}
+      </div>
+      ${stats.totalFiles === 0 ? '<p style="color: #666;">No Parquet files have been exported yet.</p>' : ''}
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 15px; margin-bottom: 15px;">
         <div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
           <strong style="color: #2e7d32;">Vessels</strong><br>
@@ -524,6 +555,7 @@ async function refreshStoreStats() {
             <tr style="background: #f5f5f5;">
               <th style="text-align: left; padding: 8px; border-bottom: 2px solid #ddd;">Tier</th>
               <th style="text-align: right; padding: 8px; border-bottom: 2px solid #ddd;">Files</th>
+              <th style="text-align: right; padding: 8px; border-bottom: 2px solid #ddd;">Size</th>
             </tr>
           </thead>
           <tbody>${tierRows}</tbody>
