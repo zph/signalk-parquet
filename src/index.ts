@@ -332,7 +332,6 @@ export default function (app: ServerAPI): SignalKPlugin {
       },
       // SQLite buffer options
       useSqliteBuffer: true, // Always use SQLite buffer
-      bufferRetentionHours: options?.bufferRetentionHours ?? 6,
       useHivePartitioning: true, // Always use Hive partitioning
       // Auto-discovery configuration
       autoDiscovery: options?.autoDiscovery || {
@@ -403,7 +402,6 @@ export default function (app: ServerAPI): SignalKPlugin {
         state.sqliteBuffer = new SQLiteBuffer({
           dbPath,
           maxBatchSize: state.currentConfig.exportBatchSize || 50000,
-          retentionHours: state.currentConfig.bufferRetentionHours,
         });
 
         // Verify the buffer is actually open
@@ -1330,15 +1328,6 @@ export default function (app: ServerAPI): SignalKPlugin {
         minimum: 1000,
         maximum: 200000,
       },
-      // bufferRetentionHours: {
-      //   type: 'number',
-      //   title: 'SQLite Buffer Retention (hours)',
-      //   description:
-      //     'How long to keep already-exported records in SQLite as a backup after they have been written to Parquet. Longer retention allows re-export if a Parquet file is lost, but uses more disk space.',
-      //   default: 48,
-      //   minimum: 48,
-      //   maximum: 168,
-      // },
       dailyExportHour: {
         type: 'number',
         title: 'Daily Export Hour (UTC)',

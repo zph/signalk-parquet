@@ -46,8 +46,6 @@ async function refreshBufferStatus() {
 
     const stats = data.stats;
     const exportStatus = data.exportService;
-    const retentionHours = data.retentionHours ?? 6;
-    const retentionLabel = `${retentionHours} ${retentionHours === 1 ? 'hour' : 'hours'}`;
 
     const formatBytes = bytes => {
       if (bytes < 1024) return `${bytes} B`;
@@ -64,7 +62,7 @@ async function refreshBufferStatus() {
 
     container.innerHTML = `
       <p style="color: #555; margin: 0 0 15px 0; font-size: 0.95em;">
-        Signal K data is exported to Parquet hourly after its row count is verified. Exported rows remain in SQLite for ${retentionLabel}, then are deleted. SQLite reuses freed space but does not shrink its database file automatically.</p>
+        Signal K data is exported hourly. After the Parquet row count is verified, exported SQLite rows are deleted. Incremental vacuuming reclaims freed pages in batches while the database is above 128 MB, then at most once per day when enough space is free. Existing databases require a one-time offline conversion before incremental vacuuming can shrink the file.</p>
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
         <div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
           <strong style="color: #FF9800;">Pending Export</strong><br>
@@ -74,7 +72,7 @@ async function refreshBufferStatus() {
         <div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
           <strong style="color: #4CAF50;">Exported</strong><br>
           <span style="font-size: 1.5em;">${stats.exportedRecords.toLocaleString()}</span>
-          <small style="display: block; color: #999; margin-top: 4px;">Written to Parquet, purged after ${retentionLabel}</small>
+          <small style="display: block; color: #999; margin-top: 4px;">Written to Parquet, verified, then purged</small>
         </div>
         <div style="background: white; padding: 15px; border-radius: 5px; border: 1px solid #ddd;">
           <strong style="color: #1565C0;">Total Records</strong><br>

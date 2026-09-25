@@ -54,7 +54,6 @@ export interface BufferStats {
 export interface SQLiteBufferConfig {
   dbPath: string;
   maxBatchSize?: number;
-  retentionHours?: number;
 }
 
 interface TableInfo {
@@ -77,7 +76,6 @@ export class SQLiteBuffer {
   private db: InstanceType<typeof DatabaseSync>;
   private _open: boolean;
   private readonly dbPath: string;
-  private readonly retentionHours: number;
   private tableMap: Map<string, TableInfo>; // keyed by SignalK path
 
   constructor(config: SQLiteBufferConfig) {
@@ -88,7 +86,6 @@ export class SQLiteBuffer {
     }
 
     this.dbPath = config.dbPath;
-    this.retentionHours = config.retentionHours ?? 6;
 
     // Ensure directory exists
     fs.ensureDirSync(path.dirname(this.dbPath));
@@ -103,6 +100,9 @@ export class SQLiteBuffer {
     this.db.exec('PRAGMA cache_size = -64000'); // 64MB cache
     this.db.exec('PRAGMA temp_store = MEMORY');
     this.db.exec('PRAGMA mmap_size = 268435456'); // 256MB memory-mapped I/O
+    // Takes effect immediately for a new DB. Existing databases with auto_vacuum=NONE
+    // need a one-time offline VACUUM to convert; never trigger that blocking rebuild here.
+    this.db.exec('PRAGMA auto_vacuum = INCREMENTAL');
 
     // Create metadata table
     this.createMetadataSchema();
@@ -122,6 +122,10 @@ export class SQLiteBuffer {
         table_name TEXT NOT NULL,
         is_object INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE TABLE IF NOT EXISTS buffer_maintenance (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
       );
     `);
   }
@@ -696,20 +700,96 @@ export class SQLiteBuffer {
     return dataRecord;
   }
 
-  /**
-   * Clean up old exported records from all per-path tables
-   */
+  /** Delete records immediately after their verified Parquet export. */
   cleanup(): number {
     let totalCleaned = 0;
     for (const [, info] of this.tableMap) {
       const result = this.db
-        .prepare(
-          `DELETE FROM ${info.tableName} WHERE exported = 1 AND created_at < datetime('now', '-' || ? || ' hours')`
-        )
-        .run(this.retentionHours);
+        .prepare(`DELETE FROM ${info.tableName} WHERE exported = 1`)
+        .run();
       totalCleaned += Number(result.changes);
     }
     return totalCleaned;
+  }
+
+  /**
+   * Reclaim SQLite free pages without rebuilding the whole database. Larger DBs
+   * are trimmed by up to 32 MiB per hourly export until they reach 128 MiB;
+   * after that, trim at most 8 MiB once per UTC day when at least 32 MiB is free.
+   *
+   * Incremental vacuum only works when auto_vacuum=INCREMENTAL. Legacy DBs
+   * require a one-time offline conversion (PRAGMA auto_vacuum=INCREMENTAL;
+   * VACUUM) before this maintenance can reclaim disk space.
+   */
+  reclaimSpace(): {
+    enabled: boolean;
+    pagesReclaimed: number;
+    dbBytes: number;
+    freeBytes: number;
+  } {
+    const mode = Number(
+      (this.db.prepare('PRAGMA auto_vacuum').get() as { auto_vacuum: number })
+        .auto_vacuum
+    );
+    const pageSize = Number(
+      (this.db.prepare('PRAGMA page_size').get() as { page_size: number })
+        .page_size
+    );
+    const beforePages = Number(
+      (this.db.prepare('PRAGMA page_count').get() as { page_count: number })
+        .page_count
+    );
+    const freePages = Number(
+      (
+        this.db.prepare('PRAGMA freelist_count').get() as {
+          freelist_count: number;
+        }
+      ).freelist_count
+    );
+    const dbBytes = beforePages * pageSize;
+    const freeBytes = freePages * pageSize;
+    if (mode !== 2 || freePages === 0) {
+      return { enabled: mode === 2, pagesReclaimed: 0, dbBytes, freeBytes };
+    }
+
+    const targetBytes = 128 * 1024 * 1024;
+    let pagesToReclaim = 0;
+    let smallDbVacuumDay: string | undefined;
+    if (dbBytes > targetBytes) {
+      pagesToReclaim = Math.min(freePages, 8192); // at most 32 MiB per hourly pass
+    } else if (freeBytes >= 32 * 1024 * 1024) {
+      const day = new Date().toISOString().slice(0, 10);
+      const lastDay = this.db
+        .prepare(
+          "SELECT value FROM buffer_maintenance WHERE key = 'last-small-db-vacuum-day'"
+        )
+        .get() as { value?: string } | undefined;
+      if (lastDay?.value !== day) {
+        pagesToReclaim = Math.min(freePages, 2048); // at most 8 MiB, once per UTC day
+        smallDbVacuumDay = day;
+      }
+    }
+
+    if (pagesToReclaim > 0) {
+      this.db.exec(`PRAGMA incremental_vacuum(${pagesToReclaim})`);
+      if (smallDbVacuumDay) {
+        this.db
+          .prepare(
+            "INSERT OR REPLACE INTO buffer_maintenance (key, value) VALUES ('last-small-db-vacuum-day', ?)"
+          )
+          .run(smallDbVacuumDay);
+      }
+    }
+    const afterPages = Number(
+      (this.db.prepare('PRAGMA page_count').get() as { page_count: number })
+        .page_count
+    );
+    return {
+      enabled: true,
+      pagesReclaimed: Math.max(0, beforePages - afterPages),
+      dbBytes: afterPages * pageSize,
+      freeBytes: Math.max(0, freeBytes - (beforePages - afterPages) * pageSize),
+    };
   }
 
   /**

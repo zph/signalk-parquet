@@ -3712,7 +3712,7 @@ export function registerApiRoutes(
         success: true,
         enabled: true,
         stats,
-        retentionHours: state.currentConfig?.bufferRetentionHours ?? 6,
+        purgePolicy: 'immediately after verified Parquet export',
         exportService: exportStatus,
       });
     } catch (error) {

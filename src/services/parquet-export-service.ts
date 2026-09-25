@@ -358,6 +358,16 @@ export class ParquetExportService {
       }
       this.sqliteBuffer.cleanup();
       this.sqliteBuffer.checkpoint();
+      const vacuum = this.sqliteBuffer.reclaimSpace();
+      if (!vacuum.enabled) {
+        this.app.debug(
+          '[HourlyExport] Incremental SQLite vacuum is not enabled for this existing database; a one-time offline VACUUM conversion is required to reclaim freed pages.'
+        );
+      } else if (vacuum.pagesReclaimed > 0) {
+        this.app.debug(
+          `[HourlyExport] Incremental SQLite vacuum reclaimed ${vacuum.pagesReclaimed} pages; database is ${(vacuum.dbBytes / 1024 / 1024).toFixed(1)} MiB with ${(vacuum.freeBytes / 1024 / 1024).toFixed(1)} MiB free.`
+        );
+      }
       this.lastExportTime = new Date();
       this.lastBatchExported = recordsExported;
       this.totalExported += recordsExported;

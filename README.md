@@ -219,7 +219,6 @@ Configure basic plugin settings (path configuration is managed separately in the
 | **Retention Days** | Days to keep raw files (`0` means forever) | 0 |
 | **Daily Export Hour** | Hour (0-23 UTC) for daily compaction, aggregation, and upload; completed hours export automatically | 4 |
 | **Export Batch Size** | Max records to export per cycle (1,000-200,000) | 50000 |
-| **Buffer Retention Hours** | How long to keep verified exported records in SQLite (hours) | 6 |
 | **Enable Raw SQL** | Enable /api/query endpoint for raw SQL queries | `false` |
 
 New hourly raw, aggregated, and compacted Parquet files use ZSTD level 3.
@@ -426,7 +425,6 @@ interface PluginConfig {
   cloudUpload: CloudUploadConfig;
   useSqliteBuffer?: boolean;
   exportBatchSize?: number;
-  bufferRetentionHours?: number;
   useHivePartitioning?: boolean;
   dailyExportHour?: number;
   autoDiscovery?: AutoDiscoveryConfig;
@@ -525,7 +523,7 @@ output_directory/
 │   └── [aggregated 1-minute data]
 ├── tier=1h/
 │   └── [aggregated hourly data]
-├── buffer.db              <- SQLite WAL buffer (6h exported-row grace)
+├── buffer.db              <- SQLite WAL buffer (pending/unexported rows only)
 └── buffer.db-wal          <- Write-ahead log
 ```
 
@@ -1458,11 +1456,12 @@ The plugin uses an hourly export and daily compaction pipeline:
 
 1. **Data Collection**: Signal K data is buffered in crash-safe SQLite WAL database
 2. **Hourly Export**: Just after each UTC hour, exports completed-hour data per path (AIS vessels share files) and marks SQLite rows exported only after the file's footer count matches the SQLite snapshot
+   - Verified exported rows are then deleted from SQLite. Incremental vacuuming trims up to 32 MiB per hourly export while the DB is over 128 MiB; below that it trims up to 8 MiB once per day when at least 32 MiB is free.
 3. **Daily Compaction**: At the configured UTC hour (default: 4 AM), merges each previous-day context/path group, sorted by event then receive timestamp, into Zstd-3 Parquet
 4. **Lease**: A renewable `.parquet-export.lock` prevents concurrent writers; interrupted compactions restore unpublished source files on restart
 5. **S3 Upload**: Uploads daily files if configured
 
-The SQLite buffer remains available for current-hour History API queries. The lockfile protects local writers; it does not lock readers or provide a distributed lock for shared network storage.
+The SQLite buffer remains available for current-hour History API queries. Freed pages are reused until vacuumed; existing databases created without `auto_vacuum=INCREMENTAL` need a one-time offline conversion (`PRAGMA auto_vacuum=INCREMENTAL; VACUUM`) before incremental vacuuming can reclaim physical disk space. The lockfile protects local writers; it does not lock readers or provide a distributed lock for shared network storage.
 
 ## Startup Sequence
 

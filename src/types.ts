@@ -77,7 +77,6 @@ export interface PluginConfig {
   // SQLite buffer and Hive partitioning options
   useSqliteBuffer?: boolean; // Use SQLite WAL buffer instead of in-memory LRU
   exportBatchSize?: number; // Max records to export per cycle (default 10000)
-  bufferRetentionHours?: number; // How long to keep verified exported records in SQLite (default 6)
   useHivePartitioning?: boolean; // Use Hive-style partitioning for Parquet files
   dailyExportHour?: number; // Hour (0-23 UTC) to run daily export (default 4 = 4 AM UTC)
   autoDiscovery?: AutoDiscoveryConfig; // Auto-discovery configuration
@@ -533,6 +532,12 @@ export interface SQLiteBufferInterface {
   insert(record: DataRecord): void;
   insertBatch(records: DataRecord[]): void;
   cleanup(): number;
+  reclaimSpace(): {
+    enabled: boolean;
+    pagesReclaimed: number;
+    dbBytes: number;
+    freeBytes: number;
+  };
   getStats(): {
     totalRecords: number;
     pendingRecords: number;

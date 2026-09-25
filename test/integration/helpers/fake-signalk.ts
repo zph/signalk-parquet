@@ -243,7 +243,6 @@ export function makeTestConfig(
     homePortLatitude: 0,
     homePortLongitude: 0,
     useSqliteBuffer: true,
-    bufferRetentionHours: 48,
     useHivePartitioning: true,
     autoDiscovery: {
       enabled: false,
