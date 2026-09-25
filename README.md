@@ -17,7 +17,7 @@ Vessel data Parquet file archive with automated value and geospatial triggers. H
 - **SQLite WAL Buffering**: Crash-safe data ingestion with Write-Ahead Logging
   - Replaces in-memory buffers with persistent SQLite database
   - Automatic recovery after power loss or crashes
-  - 48-hour retention for federated queries
+  - Six-hour grace period for verified exported rows; pending rows are never aged out by cleanup
   - Per-path tables (`buffer_navigation_position`, etc.) for partition-aligned access
   - `buffer_tables` metadata table tracks path→table mapping
 - **Hive-Partitioned Storage**: Efficient file organization for query performance
@@ -219,7 +219,7 @@ Configure basic plugin settings (path configuration is managed separately in the
 | **Retention Days** | Days to keep raw files (`0` means forever) | 0 |
 | **Daily Export Hour** | Hour (0-23 UTC) for daily compaction, aggregation, and upload; completed hours export automatically | 4 |
 | **Export Batch Size** | Max records to export per cycle (1,000-200,000) | 50000 |
-| **Buffer Retention Hours** | How long to keep exported records in SQLite (hours) | 48 |
+| **Buffer Retention Hours** | How long to keep verified exported records in SQLite (hours) | 6 |
 | **Enable Raw SQL** | Enable /api/query endpoint for raw SQL queries | `false` |
 
 New hourly raw, aggregated, and compacted Parquet files use ZSTD level 3.
@@ -237,14 +237,30 @@ The first command is a dry run. The apply command takes the archive lease,
 verifies each replacement's rows and ZSTD footer, and atomically replaces
 active Parquet files. It is safe to retry after interruption.
 
+AIS vessel contexts share one raw Parquet file per path and UTC hour, while
+each row retains its true vessel context. Before installing this layout on an
+existing archive, stop ingestion and run the one-way migration:
+
+```sh
+npm run migrate:ais-shared -- /path/to/signalk-parquet
+npm run migrate:ais-shared -- /path/to/signalk-parquet --apply
+```
+
+The apply step stages ZSTD-3 files, verifies row counts and exact row content,
+publishes the shared partition, then moves old per-vessel directories to a
+recoverable `.ais-per-vessel-backup-*` directory. Readers use only the shared
+layout after upgrading; there is no old-layout fallback. Run
+`npm run benchmark:ais-shared -- /path/to/signalk-parquet` on an old-layout
+snapshot before migrating to compare file size and count-query latency.
+
 ### Auto-Discovery Configuration
 
 Configure automatic path discovery when querying unconfigured paths:
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| **Enable Auto-Discovery** | Master switch for auto-discovery | `false` |
-| **Capture All Live Paths** | Subscribe to all contexts and paths without waiting for a History API query; preferred source only; include/exclude patterns apply | `false` |
+| **Enable Auto-Discovery** | Master switch for auto-discovery | `true` |
+| **Capture All Live Paths** | Subscribe to all contexts and paths without waiting for a History API query; preferred source only; include/exclude patterns apply | `true` |
 | **Require Live Data** | Only configure if path has live SignalK data | `true` |
 | **Max Auto-Configured Paths** | Maximum number of auto-configured paths | `100` |
 | **Include Patterns** | Glob patterns for paths to include (e.g., `navigation.*`) | `[]` |
@@ -258,7 +274,14 @@ When enabled, Auto-Discovery will automatically add path configurations when:
 
 Auto-discovered paths are marked with the `autoDiscovered: true` flag and have auto-generated human-readable names prefixed with `[Auto]`.
 
-With `autoDiscovery.captureAllLivePaths: true`, the plugin instead records every matching live path immediately. This mode does not create one saved path configuration per discovered path, and `maxAutoConfiguredPaths` does not limit it. It removes the prior one-second per-path debounce so updates from different AIS vessels are not silently dropped. Expect substantially more SQLite writes and archive data.
+With `autoDiscovery.captureAllLivePaths: true`, the plugin records every
+matching live path immediately, including newly introduced paths. It also
+captures cached vessel-model values at startup and expands root-bus identity
+objects into individual paths. This mode does not create one saved path
+configuration per discovered path, and `maxAutoConfiguredPaths` does not
+limit it. The default exclusion list is empty; an existing saved exclusion
+list still applies until removed. Expect substantially more SQLite writes and
+archive data.
 
 To keep derived CPA data temporarily while retaining raw navigation data indefinitely, configure a path override, for example:
 
@@ -502,7 +525,7 @@ output_directory/
 │   └── [aggregated 1-minute data]
 ├── tier=1h/
 │   └── [aggregated hourly data]
-├── buffer.db              <- SQLite WAL buffer (48h retention)
+├── buffer.db              <- SQLite WAL buffer (6h exported-row grace)
 └── buffer.db-wal          <- Write-ahead log
 ```
 
@@ -1434,7 +1457,7 @@ marine-data/tier=raw/context=vessels__self/path=navigation__position/year=2026/d
 The plugin uses an hourly export and daily compaction pipeline:
 
 1. **Data Collection**: Signal K data is buffered in crash-safe SQLite WAL database
-2. **Hourly Export**: Just after each UTC hour, exports completed-hour data per context/path and marks SQLite rows exported only after the file is published
+2. **Hourly Export**: Just after each UTC hour, exports completed-hour data per path (AIS vessels share files) and marks SQLite rows exported only after the file's footer count matches the SQLite snapshot
 3. **Daily Compaction**: At the configured UTC hour (default: 4 AM), merges each previous-day context/path group, sorted by event then receive timestamp, into Zstd-3 Parquet
 4. **Lease**: A renewable `.parquet-export.lock` prevents concurrent writers; interrupted compactions restore unpublished source files on restart
 5. **S3 Upload**: Uploads daily files if configured

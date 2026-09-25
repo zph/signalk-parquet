@@ -29,6 +29,7 @@ import { getAvailablePathsArray } from './utils/path-discovery';
 import { getAvailableContextsForTimeRange } from './utils/context-discovery';
 import { DuckDBPool } from './utils/duckdb-pool';
 import { escapeSqlString } from './utils/sql-escape';
+import { isoTimeBound } from './utils/iso-time-bound';
 import {
   validateContext,
   validateSignalKPath,
@@ -212,8 +213,8 @@ export class HistoryProvider implements HistoryApi {
       `[HistoryProvider] getValues: context=${context}, from=${from}, to=${to}, resolution=${resolutionMs}ms (${resolutionFromQuery ? 'from query' : 'auto'}), paths=${query.pathSpecs.length}`
     );
 
-    const fromIso = from.toInstant().toString();
-    const toIso = to.toInstant().toString();
+    const fromIso = isoTimeBound(from.toInstant().toString());
+    const toIso = isoTimeBound(to.toInstant().toString());
 
     // Query each path
     const allData: { [key: string]: Array<[Timestamp, unknown]> } = {};

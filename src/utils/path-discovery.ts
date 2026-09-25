@@ -6,6 +6,8 @@ import { ZonedDateTime } from '@js-joda/core';
 import { HivePathBuilder } from './hive-path-builder';
 import { DuckDBPool } from './duckdb-pool';
 import { escapeSqlString } from './sql-escape';
+import { isAisVesselContext, SHARED_AIS_CONTEXT } from './ais-shared';
+import { isoTimeBound } from './iso-time-bound';
 
 /**
  * Get available SignalK paths from Hive directory structure
@@ -36,7 +38,9 @@ export function getAvailablePaths(
   try {
     // Get target context sanitized for matching
     const targetContext = context || app.selfContext;
-    const sanitizedTargetContext = hiveBuilder.sanitizeContext(targetContext);
+    const sanitizedTargetContext = hiveBuilder.sanitizeContext(
+      isAisVesselContext(targetContext) ? SHARED_AIS_CONTEXT : targetContext
+    );
 
     // Iterate context= directories
     const contextDirs = fs.readdirSync(hiveRawDir);
@@ -191,11 +195,13 @@ export async function getAvailablePathsForTimeRange(
   to: ZonedDateTime
 ): Promise<Path[]> {
   const hiveBuilder = new HivePathBuilder();
-  const fromIso = from.toInstant().toString();
-  const toIso = to.toInstant().toString();
+  const fromIso = isoTimeBound(from.toInstant().toString());
+  const toIso = isoTimeBound(to.toInstant().toString());
 
   // Build Hive-style context directory
-  const sanitizedContext = hiveBuilder.sanitizeContext(context);
+  const sanitizedContext = hiveBuilder.sanitizeContext(
+    isAisVesselContext(String(context)) ? SHARED_AIS_CONTEXT : context
+  );
   const contextDir = path.join(
     dataDir,
     'tier=raw',
@@ -313,7 +319,16 @@ async function checkPathHasDataInRangeHive(
   hiveBuilder: HivePathBuilder
 ): Promise<boolean> {
   // Build Hive-style glob pattern for this path
-  const filePath = hiveBuilder.getGlobPattern(dataDir, 'raw', context, pathStr);
+  const filePath = isAisVesselContext(String(context))
+    ? path.join(
+        dataDir,
+        'tier=raw',
+        `context=${hiveBuilder.sanitizeContext(SHARED_AIS_CONTEXT)}`,
+        `path=${hiveBuilder.sanitizePath(pathStr)}`,
+        '**',
+        '*.parquet'
+      )
+    : hiveBuilder.getGlobPattern(dataDir, 'raw', context, pathStr);
 
   try {
     const connection = await DuckDBPool.getConnection();
@@ -322,9 +337,10 @@ async function checkPathHasDataInRangeHive(
       // Fast query: just check if ANY row exists in time range
       const query = `
         SELECT 1 as found
-        FROM read_parquet('${escapeSqlString(filePath)}', union_by_name=true, filename=true)
+        FROM read_parquet('${escapeSqlString(filePath)}', union_by_name=true, filename=true, hive_partitioning=false)
         WHERE signalk_timestamp >= '${fromIso}'
           AND signalk_timestamp < '${toIso}'
+          ${isAisVesselContext(String(context)) ? `AND context = '${escapeSqlString(String(context))}'` : ''}
           AND filename NOT LIKE '%/processed/%'
           AND filename NOT LIKE '%/quarantine/%'
           AND filename NOT LIKE '%/failed/%'

@@ -77,7 +77,7 @@ export interface PluginConfig {
   // SQLite buffer and Hive partitioning options
   useSqliteBuffer?: boolean; // Use SQLite WAL buffer instead of in-memory LRU
   exportBatchSize?: number; // Max records to export per cycle (default 10000)
-  bufferRetentionHours?: number; // How long to keep exported records in SQLite (default 48)
+  bufferRetentionHours?: number; // How long to keep verified exported records in SQLite (default 6)
   useHivePartitioning?: boolean; // Use Hive-style partitioning for Parquet files
   dailyExportHour?: number; // Hour (0-23 UTC) to run daily export (default 4 = 4 AM UTC)
   autoDiscovery?: AutoDiscoveryConfig; // Auto-discovery configuration
@@ -684,6 +684,7 @@ export interface PluginState {
 
 // Parquet Writer Class Interface
 export interface ParquetWriter {
+  getParquetRowCount(filepath: string): Promise<number>;
   writeRecords(filepath: string, records: DataRecord[]): Promise<string>;
   writeJSON(filepath: string, records: DataRecord[]): Promise<string>;
   writeCSV(filepath: string, records: DataRecord[]): Promise<string>;

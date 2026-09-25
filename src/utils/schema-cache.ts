@@ -1,6 +1,7 @@
 import { Context, Path } from '@signalk/server-api';
 import { DuckDBPool } from './duckdb-pool';
 import * as path from 'path';
+import { isAisVesselContext, SHARED_AIS_CONTEXT } from './ais-shared';
 import * as fs from 'fs-extra';
 import { debugLogger } from './debug-logger';
 import { CACHE_TTL } from '../config/cache-defaults';
@@ -57,7 +58,9 @@ export async function getPathComponentSchema(
   try {
     // Build Hive-style path for this context and path
     // Default to 'raw' tier for schema discovery
-    const sanitizedContext = hivePathBuilder.sanitizeContext(context);
+    const sanitizedContext = hivePathBuilder.sanitizeContext(
+      isAisVesselContext(String(context)) ? SHARED_AIS_CONTEXT : context
+    );
     const sanitizedPath = hivePathBuilder.sanitizePath(pathStr);
     const pathDir = path.join(
       dataDir,

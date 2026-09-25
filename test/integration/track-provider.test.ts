@@ -298,4 +298,47 @@ describe('Track API provider', function () {
     });
     expect(res.features).to.deep.equal([]);
   });
+
+  it('reads only the requested AIS vessel from a shared position file', async () => {
+    const contexts = [
+      'vessels.urn:mrn:imo:mmsi:123456789',
+      'vessels.urn:mrn:imo:mmsi:987654321',
+    ] as Context[];
+    const writer = new ParquetWriter({ format: 'parquet', app: host.app });
+    const exporter = new ParquetExportService(
+      buffer,
+      writer,
+      {
+        outputDirectory: host.dataDir,
+        filenamePrefix: 'signalk_data',
+        useHivePartitioning: true,
+        dailyExportHour: 4,
+      },
+      host.app
+    );
+    for (const [index, context] of contexts.entries()) {
+      buffer.insert(
+        makePositionRecord(
+          context,
+          40 + index,
+          -120,
+          '2024-06-01T13:00:00.000Z'
+        )
+      );
+    }
+    const result = await exporter.exportDayToParquet(DAY);
+    expect(result.errors).to.deep.equal([]);
+    for (const [index, context] of contexts.entries()) {
+      const tracks = await provider.getTracks({
+        ...WHOLE_DAY,
+        contexts: [context],
+      });
+      expect(tracks.features).to.have.lengthOf(1);
+      expect(tracks.features[0].properties.context).to.equal(context);
+      expect(tracks.features[0].geometry?.coordinates[0][0]).to.deep.equal([
+        -120,
+        40 + index,
+      ]);
+    }
+  });
 });

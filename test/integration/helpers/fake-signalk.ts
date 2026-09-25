@@ -61,6 +61,8 @@ export interface FakeSignalKOptions {
   selfPaths?: Record<string, unknown>;
   /** Metadata returned by getMetadata(path). */
   metadata?: Record<string, unknown>;
+  /** Full-model vessel tree returned by app.getPath('vessels'). */
+  vesselsModel?: Record<string, unknown>;
 }
 
 /**
@@ -128,6 +130,8 @@ export function createFakeSignalK(
       if (key === '') return selfPaths;
       return selfPaths[key];
     },
+    getPath: (key: string) =>
+      key === 'vessels' ? options.vesselsModel : undefined,
     getMetadata: (key: string) => metadata[key],
     handleMessage: (source: string, delta: unknown) => {
       published.push({ source, delta });

@@ -327,15 +327,15 @@ export default function (app: ServerAPI): SignalKPlugin {
       },
       // SQLite buffer options
       useSqliteBuffer: true, // Always use SQLite buffer
-      bufferRetentionHours: options?.bufferRetentionHours || 48,
+      bufferRetentionHours: options?.bufferRetentionHours ?? 6,
       useHivePartitioning: true, // Always use Hive partitioning
       // Auto-discovery configuration
       autoDiscovery: options?.autoDiscovery || {
         enabled: true,
-        captureAllLivePaths: false,
+        captureAllLivePaths: true,
         requireLiveData: true,
         maxAutoConfiguredPaths: 100,
-        excludePatterns: ['design.*', 'communication.*', 'notifications.*'],
+        excludePatterns: [],
       },
       // Export batch size (how many records to export per cycle)
       exportBatchSize: options?.exportBatchSize || 50000,
@@ -1320,7 +1320,7 @@ export default function (app: ServerAPI): SignalKPlugin {
             title: 'Capture all live Signal K paths',
             description:
               'Subscribe to every live context and path proactively, without waiting for a history query. Include/exclude patterns still apply. Higher-volume AIS data can substantially increase storage.',
-            default: false,
+            default: true,
           },
           enabled: {
             type: 'boolean',

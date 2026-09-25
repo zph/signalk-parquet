@@ -244,6 +244,80 @@ describe('delta ingestion and regimen control', () => {
     expect(buffer.getStats().pendingRecords).to.equal(2);
   });
 
+  it('captures cached static paths, root leaves, and paths introduced after subscription', async () => {
+    buffer.close();
+    await host.cleanup();
+    host = createFakeSignalK({
+      vesselsModel: {
+        'test-self': {
+          environment: {
+            depth: {
+              transducerToKeel: {
+                value: 1.4,
+                timestamp: NOW,
+              },
+            },
+          },
+          navigation: {
+            anchor: {
+              maxRadius: { value: 35, timestamp: NOW },
+            },
+          },
+        },
+      },
+    });
+    buffer = new SQLiteBuffer({ dbPath: path.join(host.dataDir, 'buffer.db') });
+    config = makeTestConfig(host.dataDir);
+    state = makeState(buffer, config);
+    config.autoDiscovery = {
+      enabled: true,
+      captureAllLivePaths: true,
+      requireLiveData: false,
+      excludePatterns: [],
+    };
+    updateDataSubscriptions([], state, config, host.app);
+    host.emitCommand({
+      context: 'vessels.test-self',
+      updates: [
+        {
+          timestamp: NOW,
+          values: [
+            {
+              path: '',
+              value: {
+                design: { draft: 1.8 },
+                communication: { crewNames: ['A', 'B'] },
+              },
+            },
+          ],
+        },
+      ],
+    });
+    host.emitCommand({
+      context: 'vessels.test-self',
+      updates: [
+        {
+          timestamp: NOW,
+          values: [
+            { path: 'environment.newSensor.reading', value: 42 },
+            { path: 'commands.captureMoored', value: true },
+          ],
+        },
+      ],
+    });
+    for (const path of [
+      'environment.depth.transducerToKeel',
+      'navigation.anchor.maxRadius',
+      'design.draft',
+      'communication.crewNames',
+      'environment.newSensor.reading',
+      'commands.captureMoored',
+    ]) {
+      expect(buffer.getKnownPaths().has(path), path).to.equal(true);
+    }
+    expect(buffer.getStats().pendingRecords).to.equal(6);
+  });
+
   it('does not collect a regimen-gated path until its command turns on', () => {
     updateDataSubscriptions(PATHS, state, config, host.app);
 

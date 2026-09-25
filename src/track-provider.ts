@@ -36,6 +36,7 @@
 
 import * as fs from 'fs-extra';
 import * as path from 'path';
+import { isAisVesselContext, SHARED_AIS_CONTEXT } from './utils/ais-shared';
 import { Context, Path, ServerAPI } from '@signalk/server-api';
 import { DuckDBPool } from './utils/duckdb-pool';
 import { escapeSqlString } from './utils/sql-escape';
@@ -842,10 +843,13 @@ export class TrackProvider implements TrackApi {
   // -- queries --------------------------------------------------------------
 
   private positionDir(dataDir: string, context: Context): string {
+    const partitionContext = isAisVesselContext(String(context))
+      ? SHARED_AIS_CONTEXT
+      : context;
     return path.join(
       dataDir,
       'tier=raw',
-      `context=${this.hive.sanitizeContext(context)}`,
+      `context=${this.hive.sanitizeContext(partitionContext)}`,
       `path=${this.hive.sanitizePath(POSITION_PATH)}`
     );
   }
@@ -873,15 +877,18 @@ export class TrackProvider implements TrackApi {
     try {
       const sources: string[] = [];
       if (hasParquet) {
+        const partitionContext = isAisVesselContext(String(context))
+          ? SHARED_AIS_CONTEXT
+          : context;
         const glob = this.hive.getGlobPattern(
           dataDir,
           'raw',
-          context,
+          partitionContext,
           POSITION_PATH
         );
         sources.push(
           `SELECT signalk_timestamp, TRY_CAST(value_latitude AS DOUBLE) AS lat, TRY_CAST(value_longitude AS DOUBLE) AS lon ` +
-            `FROM (SELECT * FROM read_parquet('${escapeSqlString(glob)}', union_by_name=true, filename=true) WHERE ${FILENAME_EXCLUSIONS})`
+            `FROM (SELECT * FROM read_parquet('${escapeSqlString(glob)}', union_by_name=true, filename=true, hive_partitioning=false) WHERE ${FILENAME_EXCLUSIONS}${isAisVesselContext(String(context)) ? ` AND context = '${escapeSqlString(String(context))}'` : ''})`
         );
       }
       if (hasBufferTable && buffer) {
@@ -960,11 +967,14 @@ export class TrackProvider implements TrackApi {
     dataDir: string,
     buffer: TrackBufferSource | undefined
   ): Promise<PropertySeries | null> {
+    const partitionContext = isAisVesselContext(String(context))
+      ? SHARED_AIS_CONTEXT
+      : context;
     const hasParquet = await fs.pathExists(
       path.join(
         dataDir,
         'tier=raw',
-        `context=${this.hive.sanitizeContext(context)}`,
+        `context=${this.hive.sanitizeContext(partitionContext)}`,
         `path=${this.hive.sanitizePath(signalkPath)}`
       )
     );
@@ -994,12 +1004,12 @@ export class TrackProvider implements TrackApi {
         const glob = this.hive.getGlobPattern(
           dataDir,
           'raw',
-          context,
+          partitionContext,
           signalkPath
         );
         sources.push(
           `SELECT signalk_timestamp, ${parquetValue} AS value ` +
-            `FROM (SELECT * FROM read_parquet('${escapeSqlString(glob)}', union_by_name=true, filename=true) WHERE ${FILENAME_EXCLUSIONS})`
+            `FROM (SELECT * FROM read_parquet('${escapeSqlString(glob)}', union_by_name=true, filename=true, hive_partitioning=false) WHERE ${FILENAME_EXCLUSIONS}${isAisVesselContext(String(context)) ? ` AND context = '${escapeSqlString(String(context))}'` : ''})`
         );
       }
       if (hasBufferTable && buffer) {

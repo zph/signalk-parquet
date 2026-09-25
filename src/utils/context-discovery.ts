@@ -7,6 +7,7 @@ import { CACHE_TTL } from '../config/cache-defaults';
 import { HivePathBuilder } from './hive-path-builder';
 import { DuckDBPool } from './duckdb-pool';
 import { escapeSqlString } from './sql-escape';
+import { isoTimeBound } from './iso-time-bound';
 import { SpatialFilter, buildSpatialSqlClause } from './spatial-queries';
 
 // Cache for context list
@@ -226,8 +227,8 @@ export async function getAvailableContextsForTimeRange(
     // large AIS store can have hundreds of context directories — a Promise.all
     // fan-out would open them all at once. After the first request the
     // resolutions are cached, so the sequential cost is a cold-start-only one.
-    const fromIso = from.toInstant().toString();
-    const toIso = to.toInstant().toString();
+    const fromIso = isoTimeBound(from.toInstant().toString());
+    const toIso = isoTimeBound(to.toInstant().toString());
     const matchingContexts: string[] = [];
     for (const sanitized of matchingSanitized) {
       const resolved = await resolveTrueContexts(dataDir, sanitized);
@@ -360,8 +361,8 @@ export async function getContextsInSpatialFilter(
   to: ZonedDateTime,
   filter: SpatialFilter
 ): Promise<Context[]> {
-  const fromIso = from.toInstant().toString();
-  const toIso = to.toInstant().toString();
+  const fromIso = isoTimeBound(from.toInstant().toString());
+  const toIso = isoTimeBound(to.toInstant().toString());
 
   const glob = path.join(
     dataDir,

@@ -37,18 +37,21 @@ const PATHS = ['navigation.position', 'navigation.speedOverGround'] as Path[];
 const realNow = Date.now;
 let clock = 1_000_000;
 
-beforeEach(() => {
-  clock = 1_000_000;
-  Date.now = () => clock;
-  clearAllCaches();
-});
+function installClockHooks(): void {
+  beforeEach(() => {
+    clock = 1_000_000;
+    Date.now = () => clock;
+    clearAllCaches();
+  });
 
-afterEach(() => {
-  Date.now = realNow;
-  clearAllCaches();
-});
+  afterEach(() => {
+    Date.now = realNow;
+    clearAllCaches();
+  });
+}
 
 describe('path cache', () => {
+  installClockHooks();
   it('returns null on a miss', () => {
     expect(getCachedPaths(DATA_DIR, CTX, FROM, TO)).to.equal(null);
   });
@@ -87,20 +90,15 @@ describe('path cache', () => {
 
   it('does not share an entry across minute boundaries', () => {
     setCachedPaths(DATA_DIR, CTX, FROM, TO, PATHS);
-    const miss = getCachedPaths(
-      DATA_DIR,
-      CTX,
-      zdt('2025-11-02T10:16:30Z'),
-      TO
-    );
+    const miss = getCachedPaths(DATA_DIR, CTX, zdt('2025-11-02T10:16:30Z'), TO);
     expect(miss).to.equal(null);
   });
 
   it('keys on the context', () => {
     setCachedPaths(DATA_DIR, CTX, FROM, TO, PATHS);
-    expect(getCachedPaths(DATA_DIR, 'vessels.other' as Context, FROM, TO)).to.equal(
-      null
-    );
+    expect(
+      getCachedPaths(DATA_DIR, 'vessels.other' as Context, FROM, TO)
+    ).to.equal(null);
   });
 
   it('keys on the data directory', () => {
@@ -141,9 +139,9 @@ describe('path cache', () => {
 
     expect(getPathCacheStats().size).to.equal(CACHE_SIZE.PATH_CONTEXT_MAX);
     // The first-inserted (oldest) context was evicted; the newest is present.
-    expect(getCachedPaths(DATA_DIR, 'vessels.v0' as Context, FROM, TO)).to.equal(
-      null
-    );
+    expect(
+      getCachedPaths(DATA_DIR, 'vessels.v0' as Context, FROM, TO)
+    ).to.equal(null);
     expect(
       getCachedPaths(DATA_DIR, 'vessels.vNew' as Context, FROM, TO)
     ).to.deep.equal(['pNew']);
@@ -168,6 +166,7 @@ describe('path cache', () => {
 });
 
 describe('context cache', () => {
+  installClockHooks();
   const CONTEXTS = [
     'vessels.self',
     'vessels.urn:mrn:imo:mmsi:123',
@@ -224,6 +223,7 @@ describe('context cache', () => {
 });
 
 describe('clearAllCaches', () => {
+  installClockHooks();
   it('empties both caches', () => {
     setCachedPaths(DATA_DIR, CTX, FROM, TO, PATHS);
     setCachedContexts(DATA_DIR, FROM, TO, [CTX]);

@@ -26,6 +26,7 @@ import { HivePathBuilder } from '../../src/utils/hive-path-builder';
 import { createFakeSignalK, FakeSignalK } from './helpers/fake-signalk';
 import { makeScalarRecord, makePositionRecord } from './helpers/records';
 import { ParquetCompression, ParquetField } from '../../src/types';
+import { migrateSharedAis } from '../../src/utils/migrate-shared-ais';
 
 // A fixed historical day so export (which excludes "today") always includes it
 // and the assertions never depend on the wall clock.
@@ -200,6 +201,123 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
       expect(
         metadata.getRowObjects().map(row => row.compression)
       ).to.deep.equal(['ZSTD']);
+    } finally {
+      conn.disconnectSync();
+    }
+  });
+
+  it('shares one AIS file across vessels and verifies its row count before clearing SQLite', async () => {
+    const hour = new Date(Date.now() - 72 * 3600000);
+    hour.setUTCHours(11, 0, 0, 0);
+    const contexts = [
+      'vessels.urn:mrn:imo:mmsi:123456789',
+      'vessels.urn:mrn:imo:mmsi:987654321',
+    ];
+    for (const [index, context] of contexts.entries()) {
+      buffer.insert(
+        makePositionRecord(
+          context,
+          37 + index,
+          -122 - index,
+          new Date(hour.getTime() + index * 1000).toISOString()
+        )
+      );
+    }
+    const result = await exportService.exportHourToParquet(hour);
+    expect(result.errors).to.deep.equal([]);
+    expect(result.recordsExported).to.equal(2);
+    expect(result.filesCreated).to.have.lengthOf(1);
+    expect(result.filesCreated[0]).to.include('context=ais__shared');
+    expect(buffer.getStats().pendingRecords).to.equal(0);
+    const conn = await DuckDBPool.getConnection();
+    try {
+      const rows = await conn.runAndReadAll(
+        `SELECT context, value_latitude FROM read_parquet('${toGlob(result.filesCreated[0])}', hive_partitioning=false) ORDER BY context`
+      );
+      expect(rows.getRowObjects().map(row => row.context)).to.deep.equal(
+        contexts
+      );
+    } finally {
+      conn.disconnectSync();
+    }
+  });
+
+  it('keeps SQLite rows pending when the Parquet footer count does not match', async () => {
+    const hour = new Date(Date.now() - 72 * 3600000);
+    hour.setUTCHours(12, 0, 0, 0);
+    buffer.insert(
+      scalarRecord('navigation.speedOverGround', 5, hour.toISOString())
+    );
+    const writer = new ParquetWriter({ format: 'parquet', app: host.app });
+    writer.getParquetRowCount = async () => 0;
+    const service = new ParquetExportService(
+      buffer,
+      writer,
+      {
+        outputDirectory: host.dataDir,
+        filenamePrefix: 'signalk_data',
+        useHivePartitioning: true,
+        dailyExportHour: 4,
+      },
+      host.app
+    );
+    const result = await service.exportHourToParquet(hour);
+    expect(result.errors).to.have.lengthOf(1);
+    expect(result.filesCreated).to.deep.equal([]);
+    expect(buffer.getStats().pendingRecords).to.equal(1);
+  });
+
+  it('migrates old AIS files into one verified shared ZSTD file and preserves a recoverable backup', async () => {
+    const writer = new ParquetWriter({ format: 'parquet', app: host.app });
+    const contexts = [
+      'vessels.urn:mrn:imo:mmsi:123456789',
+      'vessels.urn:mrn:imo:mmsi:987654321',
+    ];
+    for (const [index, context] of contexts.entries()) {
+      const file = path.join(
+        hive.buildPath(
+          host.dataDir,
+          'raw',
+          context,
+          'navigation.position',
+          DAY
+        ),
+        `old-${index}.parquet`
+      );
+      await writer.writeRecords(file, [
+        makePositionRecord(
+          context,
+          37 + index,
+          -122,
+          '2024-06-01T11:00:00.000Z'
+        ),
+      ]);
+    }
+    const preview = await migrateSharedAis(host.dataDir);
+    expect(preview.sourceFiles).to.equal(2);
+    const result = await migrateSharedAis(host.dataDir, true);
+    expect(result.sourceFiles).to.equal(2);
+    expect(result.sharedFiles).to.equal(1);
+    expect(result.rows).to.equal(2);
+    expect(result.backupDirectory).to.be.a('string');
+    const shared = path.join(
+      host.dataDir,
+      'tier=raw',
+      'context=ais__shared',
+      'path=navigation__position',
+      'year=2024',
+      'day=153'
+    );
+    const files = await fs.readdir(shared);
+    expect(files).to.have.lengthOf(1);
+    const conn = await DuckDBPool.getConnection();
+    try {
+      const rows = await conn.runAndReadAll(
+        `SELECT context FROM read_parquet('${toGlob(path.join(shared, files[0]))}', hive_partitioning=false) ORDER BY context`
+      );
+      expect(rows.getRowObjects().map(row => row.context)).to.deep.equal(
+        contexts
+      );
     } finally {
       conn.disconnectSync();
     }

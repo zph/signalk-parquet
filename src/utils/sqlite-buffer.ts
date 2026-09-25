@@ -7,6 +7,7 @@
  */
 
 import * as path from 'path';
+import { AIS_VESSEL_CONTEXT_PREFIX } from './ais-shared';
 import * as fs from 'fs-extra';
 import { DataRecord } from '../types';
 
@@ -87,7 +88,7 @@ export class SQLiteBuffer {
     }
 
     this.dbPath = config.dbPath;
-    this.retentionHours = config.retentionHours || 24;
+    this.retentionHours = config.retentionHours ?? 6;
 
     // Ensure directory exists
     fs.ensureDirSync(path.dirname(this.dbPath));
@@ -924,18 +925,29 @@ export class SQLiteBuffer {
     signalkPath: string,
     hour: Date
   ): number {
+    return this.getHourExportSnapshot(context, signalkPath, hour).count;
+  }
+
+  getHourExportSnapshot(
+    context: string,
+    signalkPath: string,
+    hour: Date,
+    sharedAis = false
+  ): { count: number; maxId: number } {
     const info = this.tableMap.get(signalkPath);
-    if (!this._open || !info) return 0;
+    if (!this._open || !info) return { count: 0, maxId: 0 };
     const [start, end] = this.hourBounds(hour);
+    const contextWhere = sharedAis ? 'context LIKE ?' : 'context = ?';
+    const contextValue = sharedAis ? `${AIS_VESSEL_CONTEXT_PREFIX}%` : context;
     const row = this.db
       .prepare(
         `
-      SELECT COUNT(*) AS cnt FROM ${info.tableName}
-      WHERE context = ? AND received_timestamp >= ? AND received_timestamp < ? AND exported = 0
+      SELECT COUNT(*) AS cnt, COALESCE(MAX(id), 0) AS max_id FROM ${info.tableName}
+      WHERE ${contextWhere} AND received_timestamp >= ? AND received_timestamp < ? AND exported = 0
     `
       )
-      .get(context, start, end) as { cnt: number };
-    return row.cnt;
+      .get(contextValue, start, end) as { cnt: number; max_id: number };
+    return { count: row.cnt, maxId: row.max_id };
   }
 
   getRecordsForPathAndHourBatched(
@@ -943,20 +955,29 @@ export class SQLiteBuffer {
     signalkPath: string,
     hour: Date,
     limit: number,
-    offset: number
+    offset: number,
+    options: { maxId?: number; sharedAis?: boolean } = {}
   ): DataRecord[] {
     const info = this.tableMap.get(signalkPath);
     if (!this._open || !info) return [];
     const [start, end] = this.hourBounds(hour);
+    const contextWhere = options.sharedAis ? 'context LIKE ?' : 'context = ?';
+    const contextValue = options.sharedAis
+      ? `${AIS_VESSEL_CONTEXT_PREFIX}%`
+      : context;
+    const idWhere = options.maxId === undefined ? '' : ' AND id <= ?';
+    const params: SQLInputValue[] = [contextValue, start, end];
+    if (options.maxId !== undefined) params.push(options.maxId);
+    params.push(limit, offset);
     const rows = this.db
       .prepare(
         `
       SELECT * FROM ${info.tableName}
-      WHERE context = ? AND received_timestamp >= ? AND received_timestamp < ? AND exported = 0
+      WHERE ${contextWhere} AND received_timestamp >= ? AND received_timestamp < ? AND exported = 0${idWhere}
       ORDER BY received_timestamp ASC, id ASC LIMIT ? OFFSET ?
     `
       )
-      .all(context, start, end, limit, offset) as BufferRecord[];
+      .all(...params) as BufferRecord[];
     return rows.map(row => this.bufferRecordToDataRecord(row, signalkPath));
   }
 
@@ -964,19 +985,48 @@ export class SQLiteBuffer {
     context: string,
     signalkPath: string,
     hour: Date,
-    batchId: string
-  ): void {
+    batchId: string,
+    options: {
+      maxId?: number;
+      sharedAis?: boolean;
+      expectedCount?: number;
+    } = {}
+  ): number {
     const info = this.tableMap.get(signalkPath);
-    if (!this._open || !info) return;
+    if (!this._open || !info) return 0;
     const [start, end] = this.hourBounds(hour);
-    this.db
-      .prepare(
-        `
+    const contextWhere = options.sharedAis ? 'context LIKE ?' : 'context = ?';
+    const contextValue = options.sharedAis
+      ? `${AIS_VESSEL_CONTEXT_PREFIX}%`
+      : context;
+    const idWhere = options.maxId === undefined ? '' : ' AND id <= ?';
+    const params: SQLInputValue[] = [batchId, contextValue, start, end];
+    if (options.maxId !== undefined) params.push(options.maxId);
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = this.db
+        .prepare(
+          `
       UPDATE ${info.tableName} SET exported = 1, export_batch_id = ?
-      WHERE context = ? AND received_timestamp >= ? AND received_timestamp < ? AND exported = 0
+      WHERE ${contextWhere} AND received_timestamp >= ? AND received_timestamp < ? AND exported = 0${idWhere}
     `
-      )
-      .run(batchId, context, start, end);
+        )
+        .run(...params);
+      const changed = Number(result.changes);
+      if (
+        options.expectedCount !== undefined &&
+        changed !== options.expectedCount
+      ) {
+        throw new Error(
+          `Export mark count mismatch for ${context}:${signalkPath}: ${changed} vs ${options.expectedCount}`
+        );
+      }
+      this.db.exec('COMMIT');
+      return changed;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   /**

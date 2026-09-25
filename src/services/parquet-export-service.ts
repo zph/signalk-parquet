@@ -14,6 +14,7 @@ import { HivePathBuilder } from '../utils/hive-path-builder';
 import { globIn } from '../utils/glob-in';
 import { DuckDBPool } from '../utils/duckdb-pool';
 import { FileLease } from '../utils/file-lease';
+import { isAisVesselContext, SHARED_AIS_CONTEXT } from '../utils/ais-shared';
 
 export interface ExportServiceConfig {
   outputDirectory: string;
@@ -288,17 +289,32 @@ export class ParquetExportService {
     const errors: string[] = [];
     let recordsExported = 0;
     try {
+      const groups = new Map<
+        string,
+        { context: string; signalkPath: string; sharedAis: boolean }
+      >();
       for (const {
         context,
         path: signalkPath,
       } of this.sqliteBuffer.getPathsForHour(hour)) {
+        const sharedAis = isAisVesselContext(context);
+        const exportContext = sharedAis ? SHARED_AIS_CONTEXT : context;
+        groups.set(`${exportContext}\0${signalkPath}`, {
+          context: exportContext,
+          signalkPath,
+          sharedAis,
+        });
+      }
+      for (const { context, signalkPath, sharedAis } of groups.values()) {
+        let file: string | null = null;
         try {
-          const count = this.sqliteBuffer.getRecordCountForPathAndHour(
+          const snapshot = this.sqliteBuffer.getHourExportSnapshot(
             context,
             signalkPath,
-            hour
+            hour,
+            sharedAis
           );
-          if (!count) continue;
+          if (!snapshot.count) continue;
           let offset = 0;
           const nextBatch = (): DataRecord[] => {
             const rows = this.sqliteBuffer.getRecordsForPathAndHourBatched(
@@ -306,19 +322,21 @@ export class ParquetExportService {
               signalkPath,
               hour,
               5000,
-              offset
+              offset,
+              { maxId: snapshot.maxId, sharedAis }
             );
             offset += rows.length;
             return rows;
           };
           const firstBatch = nextBatch();
-          const file = await this.exportDailyGroupBatched(
+          file = await this.exportDailyGroupBatched(
             context,
             signalkPath,
             firstBatch,
             nextBatch,
             hour,
-            lease
+            lease,
+            snapshot.count
           );
           if (!file) continue;
           lease.assertHeld();
@@ -326,11 +344,13 @@ export class ParquetExportService {
             context,
             signalkPath,
             hour,
-            batchId
+            batchId,
+            { maxId: snapshot.maxId, sharedAis, expectedCount: snapshot.count }
           );
           filesCreated.push(file);
-          recordsExported += count;
+          recordsExported += snapshot.count;
         } catch (error) {
+          if (file) await fs.remove(file);
           const message = `[HourlyExport] ${context}:${signalkPath}: ${(error as Error).message}`;
           this.app.error(message);
           errors.push(message);
@@ -543,152 +563,34 @@ export class ParquetExportService {
    * @returns Export result with details about files created
    */
   async exportDayToParquet(targetDate: Date): Promise<ExportResult> {
-    if (this.isExporting) {
-      this.app.debug('Export already in progress, skipping daily export');
-      return {
-        batchId: '',
-        recordsExported: 0,
-        filesCreated: [],
-        duration: 0,
-        errors: ['Export already in progress'],
-      };
-    }
-
-    const lease = this.acquireLease();
-    this.isExporting = true;
     const startTime = Date.now();
     const batchId = this.generateBatchId();
     const filesCreated: string[] = [];
     const errors: string[] = [];
     let recordsExported = 0;
-
-    const dateStr = targetDate.toISOString().slice(0, 10);
-    this.app.debug(`[DailyExport] Starting daily export for ${dateStr}`);
-
-    try {
-      // Get all distinct context/path combinations for this date
-      const pathsForDate = this.sqliteBuffer.getPathsForDate(targetDate);
-
-      if (pathsForDate.length === 0) {
-        this.app.debug(`[DailyExport] No data found for ${dateStr}`);
-        this.lastExportTime = new Date();
-        this.lastBatchExported = 0;
-        this.lastExportTrigger = 'daily';
-        return {
-          batchId,
-          recordsExported: 0,
-          filesCreated: [],
-          duration: Date.now() - startTime,
-          errors: [],
-        };
-      }
-
-      this.app.debug(
-        `[DailyExport] Found ${pathsForDate.length} paths with data for ${dateStr}`
-      );
-
-      // Export each context/path to its own file (batched to limit memory)
-      const BATCH_SIZE = 5000;
-
-      for (const { context, path: signalkPath } of pathsForDate) {
-        try {
-          const count = this.sqliteBuffer.getRecordCountForPathAndDate(
-            context,
-            signalkPath,
-            targetDate
-          );
-
-          if (count === 0) {
-            continue;
-          }
-
-          const firstBatch = this.sqliteBuffer.getRecordsForPathAndDateBatched(
-            context,
-            signalkPath,
-            targetDate,
-            BATCH_SIZE,
-            0
-          );
-          let offset = BATCH_SIZE;
-
-          const filePath = await this.exportDailyGroupBatched(
-            context,
-            signalkPath,
-            firstBatch,
-            () => {
-              const batch = this.sqliteBuffer.getRecordsForPathAndDateBatched(
-                context,
-                signalkPath,
-                targetDate,
-                BATCH_SIZE,
-                offset
-              );
-              offset += BATCH_SIZE;
-              return batch;
-            },
-            targetDate,
-            lease
-          );
-
-          if (filePath) {
-            lease.assertHeld();
-            filesCreated.push(filePath);
-            recordsExported += count;
-
-            // Mark records as exported by date range
-            this.sqliteBuffer.markDateExported(
-              context,
-              signalkPath,
-              targetDate,
-              batchId
-            );
-
-            this.app.debug(
-              `[DailyExport] Exported ${count} records for ${context}:${signalkPath}`
-            );
-          }
-        } catch (error) {
-          const errorMsg = `[DailyExport] Failed to export ${context}:${signalkPath}: ${(error as Error).message}`;
-          this.app.error(errorMsg);
-          errors.push(errorMsg);
-        }
-      }
-
-      // Cleanup old exported records
-      const cleaned = this.sqliteBuffer.cleanup();
-      if (cleaned > 0) {
-        this.app.debug(
-          `[DailyExport] Cleaned up ${cleaned} old exported records`
-        );
-      }
-
-      // Truncate WAL after heavy export+cleanup batch
-      try {
-        this.sqliteBuffer.checkpoint();
-      } catch {
-        // Non-critical — WAL will be checkpointed eventually
-      }
-
-      this.lastExportTime = new Date();
-      this.lastBatchExported = recordsExported;
-      this.totalExported += recordsExported;
-      this.lastExportTrigger = 'daily';
-
-      this.app.debug(
-        `[DailyExport] Complete: ${recordsExported} records to ${filesCreated.length} files in ${Date.now() - startTime}ms`
-      );
-
-      return {
-        batchId,
-        recordsExported,
-        filesCreated,
-        duration: Date.now() - startTime,
-        errors,
-      };
-    } finally {
-      this.isExporting = false;
-      lease.release();
+    const day = new Date(targetDate);
+    day.setUTCHours(0, 0, 0, 0);
+    for (let hour = 0; hour < 24; hour++) {
+      const targetHour = new Date(day.getTime() + hour * 3600000);
+      if (targetHour.getTime() >= Math.floor(Date.now() / 3600000) * 3600000)
+        break;
+      const result = await this.exportHourToParquet(targetHour);
+      filesCreated.push(...result.filesCreated);
+      errors.push(...result.errors);
+      recordsExported += result.recordsExported;
     }
+    if (filesCreated.length > 1) {
+      const compacted = await this.compactDay(day);
+      errors.push(...compacted.errors);
+    }
+    this.lastExportTrigger = 'daily';
+    return {
+      batchId,
+      recordsExported,
+      filesCreated,
+      duration: Date.now() - startTime,
+      errors,
+    };
   }
 
   /**
@@ -776,7 +678,8 @@ export class ParquetExportService {
     firstBatch: DataRecord[],
     nextBatch: () => DataRecord[],
     targetDate: Date,
-    lease?: FileLease
+    lease?: FileLease,
+    expectedRecords?: number
   ): Promise<string | null> {
     if (firstBatch.length === 0) return null;
 
@@ -820,6 +723,13 @@ export class ParquetExportService {
       const stats = await fs.stat(tempFilePath);
       if (stats.size < 100) {
         throw new Error('Written file is too small, likely corrupt');
+      }
+      const writtenRecords =
+        await this.parquetWriter.getParquetRowCount(tempFilePath);
+      if (expectedRecords !== undefined && writtenRecords !== expectedRecords) {
+        throw new Error(
+          `Parquet row count mismatch for ${context}:${signalkPath}: ${writtenRecords} vs ${expectedRecords}`
+        );
       }
 
       lease?.assertHeld();

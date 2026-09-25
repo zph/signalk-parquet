@@ -342,27 +342,34 @@ function handleCommandMessage(
 
       // Debug active regimens state
 
-      // Buffer this command change with complete metadata
-      const bufferKey = `${pathConfig.context || 'vessels.self'}:${pathConfig.path}`;
-      bufferData(
-        bufferKey,
-        {
-          received_timestamp: new Date().toISOString(),
-          signalk_timestamp: update.timestamp || new Date().toISOString(),
-          context: 'vessels.self',
-          path: valueUpdate.path,
-          value: valueUpdate.value,
-          source: update.source || undefined, // Store as object, serialize at write time
-          source_label:
-            update.$source || (update.source ? update.source.label : undefined),
-          source_type: update.source ? update.source.type : undefined,
-          source_pgn: update.source ? update.source.pgn : undefined,
-          source_src: update.source ? update.source.src : undefined,
-        },
-        config,
-        state,
-        app
-      );
+      // Capture-all records this same delta through the wildcard subscription.
+      // Do not duplicate command rows when both handlers are active.
+      if (
+        !config.autoDiscovery?.enabled ||
+        !config.autoDiscovery.captureAllLivePaths
+      ) {
+        const bufferKey = `${pathConfig.context || 'vessels.self'}:${pathConfig.path}`;
+        bufferData(
+          bufferKey,
+          {
+            received_timestamp: new Date().toISOString(),
+            signalk_timestamp: update.timestamp || new Date().toISOString(),
+            context: 'vessels.self',
+            path: valueUpdate.path,
+            value: valueUpdate.value,
+            source: update.source || undefined, // Store as object, serialize at write time
+            source_label:
+              update.$source ||
+              (update.source ? update.source.label : undefined),
+            source_type: update.source ? update.source.type : undefined,
+            source_pgn: update.source ? update.source.pgn : undefined,
+            source_src: update.source ? update.source.src : undefined,
+          },
+          config,
+          state,
+          app
+        );
+      }
     }
   } catch (error) {
     app.error(
@@ -438,6 +445,72 @@ function disposeStreamSubscription(subscription: unknown): void {
   }
 }
 
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Root-bus deltas carry identity fields as a nested object at path ''. */
+function flattenRootValues(
+  value: unknown,
+  prefix = ''
+): Array<{ path: string; value: unknown }> {
+  if (!isPlainRecord(value)) {
+    return prefix ? [{ path: prefix, value }] : [];
+  }
+  if (prefix && 'latitude' in value && 'longitude' in value) {
+    return [{ path: prefix, value }];
+  }
+  return Object.entries(value).flatMap(([key, child]) =>
+    flattenRootValues(child, prefix ? `${prefix}.${key}` : key)
+  );
+}
+
+/** Reconcile cached full-model values that never emitted during this plugin run. */
+type CapturedValue = {
+  context: string;
+  path: string;
+  value: unknown;
+  timestamp?: string;
+  $source?: string;
+  source?: NormalizedDelta['source'];
+};
+
+function snapshotVesselValues(app: ServerAPI): CapturedValue[] {
+  const vessels = app.getPath('vessels');
+  if (!isPlainRecord(vessels)) return [];
+  const records: CapturedValue[] = [];
+  const walk = (context: string, node: unknown, prefix = ''): void => {
+    if (!isPlainRecord(node)) {
+      if (prefix) records.push({ context, path: prefix, value: node });
+      return;
+    }
+    if (prefix && Object.prototype.hasOwnProperty.call(node, 'value')) {
+      records.push({
+        context,
+        path: prefix,
+        value: node.value,
+        timestamp:
+          typeof node.timestamp === 'string' ? node.timestamp : undefined,
+        $source: typeof node.$source === 'string' ? node.$source : undefined,
+      });
+      return;
+    }
+    if (prefix && 'latitude' in node && 'longitude' in node) {
+      records.push({ context, path: prefix, value: node });
+      return;
+    }
+    for (const [key, child] of Object.entries(node)) {
+      if (['meta', 'values', '$source', 'timestamp', 'source'].includes(key))
+        continue;
+      walk(context, child, prefix ? `${prefix}.${key}` : key);
+    }
+  };
+  for (const [vesselId, value] of Object.entries(vessels)) {
+    walk(vesselId === 'self' ? app.selfContext : `vessels.${vesselId}`, value);
+  }
+  return records;
+}
+
 // Update data path subscriptions based on active regimens
 export function updateDataSubscriptions(
   currentPaths: PathConfig[],
@@ -472,6 +545,34 @@ export function updateDataSubscriptions(
     config.autoDiscovery.captureAllLivePaths
   ) {
     const discovery = config.autoDiscovery;
+    const bootstrapSeen = new Set<string>();
+    let bootstrapping = true;
+    const capture = (delta: CapturedValue): void => {
+      if (!delta.path) return;
+      if (
+        discovery.excludePatterns?.some(pattern =>
+          minimatch(delta.path, pattern)
+        ) ||
+        (discovery.includePatterns?.length &&
+          !discovery.includePatterns.some(pattern =>
+            minimatch(delta.path, pattern)
+          ))
+      )
+        return;
+      const key = `${delta.context}\0${delta.path}\0${delta.timestamp || ''}\0${delta.$source || ''}`;
+      if (bootstrapping) {
+        if (bootstrapSeen.has(key)) return;
+        bootstrapSeen.add(key);
+      }
+      handleStreamData(
+        delta as NormalizedDelta,
+        { path: delta.path as Path },
+        config,
+        state,
+        app
+      );
+      state.subscribedPaths.add(delta.path);
+    };
     app.subscriptionmanager.subscribe(
       {
         context: '*' as Context,
@@ -487,40 +588,31 @@ export function updateDataSubscriptions(
           if (!hasValues(update)) continue;
           for (const value of update.values) {
             const signalkPath = value.path;
-            if (!signalkPath || signalkPath.startsWith('commands.')) continue;
-            if (
-              discovery.excludePatterns?.some(pattern =>
-                minimatch(signalkPath, pattern)
-              )
-            )
-              continue;
-            if (
-              discovery.includePatterns?.length &&
-              !discovery.includePatterns.some(pattern =>
-                minimatch(signalkPath, pattern)
-              )
-            )
-              continue;
-            const normalized = {
+            const base = {
               context: delta.context || 'vessels.self',
-              path: signalkPath,
-              value: value.value,
               timestamp: update.timestamp,
               source: update.source,
               $source: update.$source,
-            } as NormalizedDelta;
-            handleStreamData(
-              normalized,
-              { path: signalkPath },
-              config,
-              state,
-              app
-            );
-            state.subscribedPaths.add(signalkPath);
+            };
+            if (signalkPath === '') {
+              for (const leaf of flattenRootValues(value.value)) {
+                capture({ ...base, ...leaf });
+              }
+            } else if (signalkPath) {
+              capture({ ...base, path: signalkPath, value: value.value });
+            }
           }
         }
       }
     );
+    try {
+      for (const cached of snapshotVesselValues(app)) capture(cached);
+    } catch (error) {
+      app.error(`[CaptureAll] Cached-model snapshot failed: ${String(error)}`);
+    } finally {
+      bootstrapping = false;
+      bootstrapSeen.clear();
+    }
     return;
   }
 

@@ -39,6 +39,17 @@ export class ParquetWriter {
     return this.schemaService;
   }
 
+  /** Footer count is checked before SQLite rows are marked exported. */
+  async getParquetRowCount(filepath: string): Promise<number> {
+    if (!parquet) throw new Error('ParquetJS not available');
+    const reader = await parquet.ParquetReader.openFile(filepath);
+    try {
+      return Number(reader.getRowCount());
+    } finally {
+      await reader.close();
+    }
+  }
+
   async writeRecords(filepath: string, records: DataRecord[]): Promise<string> {
     try {
       const directory = path.dirname(filepath);

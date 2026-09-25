@@ -57,10 +57,20 @@ describe('schema cache: data-directory scoping', function () {
       host.app
     );
     buffer.insert(
-      makePositionRecord(STORED_CONTEXT, 42.1, -70.5, '2024-06-01T10:00:00.000Z')
+      makePositionRecord(
+        STORED_CONTEXT,
+        42.1,
+        -70.5,
+        '2024-06-01T10:00:00.000Z'
+      )
     );
     buffer.insert(
-      makePositionRecord(STORED_CONTEXT, 42.2, -70.6, '2024-06-01T10:01:00.000Z')
+      makePositionRecord(
+        STORED_CONTEXT,
+        42.2,
+        -70.6,
+        '2024-06-01T10:01:00.000Z'
+      )
     );
     await exportService.exportDayToParquet(DAY);
   });
@@ -122,7 +132,8 @@ describe('schema cache: data-directory scoping', function () {
     buffer.insert(
       makePositionRecord(colonContext, 42.1, -70.5, '2024-06-01T11:00:00.000Z')
     );
-    await exportService.exportDayToParquet(DAY);
+    const hour = new Date('2024-06-01T11:00:00.000Z');
+    await exportService.exportHourToParquet(hour);
 
     const schemaA = await getPathComponentSchema(
       host.dataDir,
@@ -170,7 +181,9 @@ describe('schema cache: data-directory scoping', function () {
     } catch (err) {
       thrown = err;
     }
-    expect(thrown, 'corrupt parquet should reject, not read as scalar').to.not
-      .equal(null);
+    expect(
+      thrown,
+      'corrupt parquet should reject, not read as scalar'
+    ).to.not.equal(null);
   });
 });

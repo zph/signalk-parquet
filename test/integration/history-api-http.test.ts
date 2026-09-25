@@ -169,6 +169,66 @@ describe('History API over HTTP', function () {
     }
   });
 
+  it('isolates vessel history from the shared AIS partition', async () => {
+    const contexts = [
+      'vessels.urn:mrn:imo:mmsi:123456789',
+      'vessels.urn:mrn:imo:mmsi:987654321',
+    ];
+    const writer = new ParquetWriter({ format: 'parquet', app: host.app });
+    const exporter = new ParquetExportService(
+      buffer,
+      writer,
+      {
+        outputDirectory: host.dataDir,
+        filenamePrefix: 'signalk_data',
+        useHivePartitioning: true,
+        dailyExportHour: 4,
+      },
+      host.app
+    );
+    buffer.insert(
+      makeScalarRecord(
+        contexts[0],
+        'navigation.speedOverGround',
+        7,
+        '2024-06-01T11:00:00.000Z'
+      )
+    );
+    buffer.insert(
+      makeScalarRecord(
+        contexts[1],
+        'navigation.speedOverGround',
+        9,
+        '2024-06-01T11:00:01.000Z'
+      )
+    );
+    buffer.insert(
+      makeScalarRecord(
+        contexts[0],
+        'navigation.speedOverGround',
+        99,
+        '2024-06-01T11:01:00.000Z'
+      )
+    );
+    const exported = await exporter.exportDayToParquet(DAY);
+    expect(exported.errors).to.deep.equal([]);
+    expect(exported.recordsExported, JSON.stringify(exported)).to.equal(3);
+    for (const [index, context] of contexts.entries()) {
+      const response = await fetch(
+        valuesUrl({
+          from: '2024-06-01T11:00:00Z',
+          to: '2024-06-01T11:01:00Z',
+          paths: 'navigation.speedOverGround',
+          context,
+          resolution: '1',
+        })
+      );
+      expect(response.status).to.equal(200);
+      const body = (await response.json()) as ValuesResponse;
+      expect(body.data.map(row => row[1])).to.deep.equal([index === 0 ? 7 : 9]);
+    }
+  });
+
   it('reports the resolved context and time range in the response', async () => {
     const res = await fetch(
       valuesUrl({

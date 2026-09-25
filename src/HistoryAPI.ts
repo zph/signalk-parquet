@@ -36,6 +36,12 @@ import { CONCURRENCY } from './config/cache-defaults';
 import { SQLiteBufferInterface } from './types';
 import { HivePathBuilder, AggregationTier } from './utils/hive-path-builder';
 import {
+  isAisVesselContext,
+  readContextPartition,
+  SHARED_AIS_CONTEXT,
+} from './utils/ais-shared';
+import { isoTimeBound } from './utils/iso-time-bound';
+import {
   AutoDiscoveryService,
   AutoDiscoveryResult,
 } from './services/auto-discovery';
@@ -901,7 +907,7 @@ export class HistoryAPI {
     const timestamps = new Set<string>();
 
     // Build file path for raw position data
-    const sanitizedContext = this.hivePathBuilder.sanitizeContext(context);
+    const sanitizedContext = readContextPartition(String(context));
     const sanitizedPath = this.hivePathBuilder.sanitizePath(positionPath);
     const localFilePath = path.join(
       dataDir,
@@ -912,8 +918,8 @@ export class HistoryAPI {
       '*.parquet'
     );
 
-    const fromIso = from.toInstant().toString();
-    const toIso = to.toInstant().toString();
+    const fromIso = isoTimeBound(from.toInstant().toString());
+    const toIso = isoTimeBound(to.toInstant().toString());
 
     try {
       const connection = await DuckDBPool.getConnection();
@@ -928,11 +934,12 @@ export class HistoryAPI {
 
         // Build FROM: parquet UNION ALL buffer
         const parquetFrom = `SELECT signalk_timestamp, value_latitude, value_longitude FROM (
-          SELECT * FROM read_parquet('${escapeSqlString(localFilePath)}', union_by_name=true, filename=true)
+          SELECT * FROM read_parquet('${escapeSqlString(localFilePath)}', union_by_name=true, filename=true, hive_partitioning=false)
           WHERE filename NOT LIKE '%/processed/%'
           AND filename NOT LIKE '%/quarantine/%'
           AND filename NOT LIKE '%/failed/%'
-          AND filename NOT LIKE '%/repaired/%')`;
+          AND filename NOT LIKE '%/repaired/%'
+          ${isAisVesselContext(String(context)) ? `AND context = '${escapeSqlString(String(context))}'` : ''})`;
 
         let fromSource = `(${parquetFrom})`;
         if (hasBuffer && sqliteBuffer) {
@@ -1309,7 +1316,7 @@ export class HistoryAPI {
           `[Spatial] Fast bucket query for ${posPathSpec.path} (FIRST lat/lon per bucket + JS filter)`
         );
 
-        const sanitizedCtx = this.hivePathBuilder.sanitizeContext(context);
+        const sanitizedCtx = readContextPartition(String(context));
         const sanitizedPos = this.hivePathBuilder.sanitizePath(
           posPathSpec.path
         );
@@ -1321,8 +1328,8 @@ export class HistoryAPI {
           '**',
           '*.parquet'
         );
-        const fromIso = from.toInstant().toString();
-        const toIso = to.toInstant().toString();
+        const fromIso = isoTimeBound(from.toInstant().toString());
+        const toIso = isoTimeBound(to.toInstant().toString());
 
         try {
           const connection = await DuckDBPool.getConnection();
@@ -1347,11 +1354,12 @@ export class HistoryAPI {
 
             // Build FROM: parquet UNION ALL buffer (for today's unexported data)
             const parquetFrom = `SELECT signalk_timestamp, value_latitude, value_longitude FROM (
-              SELECT * FROM read_parquet('${escapeSqlString(posFilePath)}', union_by_name=true, filename=true)
+              SELECT * FROM read_parquet('${escapeSqlString(posFilePath)}', union_by_name=true, filename=true, hive_partitioning=false)
               WHERE filename NOT LIKE '%/processed/%'
               AND filename NOT LIKE '%/quarantine/%'
               AND filename NOT LIKE '%/failed/%'
-              AND filename NOT LIKE '%/repaired/%'${posSourceFilter})`;
+              AND filename NOT LIKE '%/repaired/%'
+              ${isAisVesselContext(String(context)) ? `AND context = '${escapeSqlString(String(context))}'` : ''}${posSourceFilter})`;
 
             let fromSource = `(${parquetFrom})`;
             if (hasBuffer && sqliteBuffer) {
@@ -1537,7 +1545,10 @@ export class HistoryAPI {
         }
 
         // Always query local first
-        const sanitizedContext = this.hivePathBuilder.sanitizeContext(context);
+        const sanitizedContext = readContextPartition(String(context));
+        const partitionContext = isAisVesselContext(String(context))
+          ? SHARED_AIS_CONTEXT
+          : context;
         const sanitizedSkPath = this.hivePathBuilder.sanitizePath(
           pathSpec.path
         );
@@ -1569,7 +1580,7 @@ export class HistoryAPI {
                 s3Config.bucket,
                 s3Config.keyPrefix || '',
                 effectiveTier,
-                context,
+                partitionContext,
                 pathSpec.path,
                 fromDate,
                 s3ToDate
@@ -1584,7 +1595,7 @@ export class HistoryAPI {
               s3Config.bucket,
               s3Config.keyPrefix || '',
               effectiveTier,
-              context,
+              partitionContext,
               pathSpec.path,
               fromDate,
               toDate
@@ -1594,8 +1605,8 @@ export class HistoryAPI {
         }
 
         // Convert ZonedDateTime to ISO string format matching parquet schema
-        const fromIso = from.toInstant().toString();
-        const toIso = to.toInstant().toString();
+        const fromIso = isoTimeBound(from.toInstant().toString());
+        const toIso = isoTimeBound(to.toInstant().toString());
 
         // Get connection from pool (spatial extension already loaded), then
         // stage this path's buffer rows into a temp table for federation
@@ -1621,11 +1632,16 @@ export class HistoryAPI {
             // Escape the path before splicing it into the SQL string literal.
             const fp = escapeSqlString(filePath);
             const isS3 = filePath.startsWith('s3://');
+            const aisFilter = isAisVesselContext(String(context))
+              ? ` WHERE context = '${escapeSqlString(String(context))}'`
+              : '';
             if (isS3) {
-              return `read_parquet('${fp}', union_by_name=true, filename=true)`;
+              return aisFilter
+                ? `(SELECT * FROM read_parquet('${fp}', union_by_name=true, filename=true, hive_partitioning=false)${aisFilter})`
+                : `read_parquet('${fp}', union_by_name=true, filename=true)`;
             }
             // Local files: exclude processed, quarantine, failed, repaired directories
-            return `(SELECT * FROM read_parquet('${fp}', union_by_name=true, filename=true) WHERE filename NOT LIKE '%/processed/%' AND filename NOT LIKE '%/quarantine/%' AND filename NOT LIKE '%/failed/%' AND filename NOT LIKE '%/repaired/%')`;
+            return `(SELECT * FROM read_parquet('${fp}', union_by_name=true, filename=true, hive_partitioning=false) WHERE filename NOT LIKE '%/processed/%' AND filename NOT LIKE '%/quarantine/%' AND filename NOT LIKE '%/failed/%' AND filename NOT LIKE '%/repaired/%'${aisFilter ? ` AND context = '${escapeSqlString(String(context))}'` : ''})`;
           };
 
           // Build FROM clause: local-only by default, hybrid only if S3 has data
@@ -1712,7 +1728,7 @@ export class HistoryAPI {
                       s3Config.bucket,
                       s3Config.keyPrefix || '',
                       'raw',
-                      context,
+                      partitionContext,
                       pathSpec.path,
                       fromDate,
                       s3ToDate
@@ -1723,7 +1739,7 @@ export class HistoryAPI {
                     s3Config.bucket,
                     s3Config.keyPrefix || '',
                     'raw',
-                    context,
+                    partitionContext,
                     pathSpec.path,
                     fromDate,
                     toDate
@@ -2035,8 +2051,8 @@ export class HistoryAPI {
         // Fallback: if parquet failed but buffer is available, query buffer only
         if (hasBuffer) {
           try {
-            const fallbackFromIso = from.toInstant().toString();
-            const fallbackToIso = to.toInstant().toString();
+            const fallbackFromIso = isoTimeBound(from.toInstant().toString());
+            const fallbackToIso = isoTimeBound(to.toInstant().toString());
             const bufferConn = await DuckDBPool.getConnection();
             try {
               const stagedFallbackTable = sqliteBuffer
