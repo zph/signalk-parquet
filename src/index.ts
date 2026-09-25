@@ -335,6 +335,7 @@ export default function (app: ServerAPI): SignalKPlugin {
       // Auto-discovery configuration
       autoDiscovery: options?.autoDiscovery || {
         enabled: true,
+        captureAllLivePaths: false,
         requireLiveData: true,
         maxAutoConfiguredPaths: 100,
         excludePatterns: ['design.*', 'communication.*', 'notifications.*'],
@@ -609,7 +610,7 @@ export default function (app: ServerAPI): SignalKPlugin {
       app.debug('Aggregation service initialized');
     }
 
-    // Daily export function - exports yesterday's data from SQLite to Parquet
+    // Daily pipeline: first catch up completed hours, then compact yesterday.
     const runDailyExport = async () => {
       if (state.isStopping) return;
       const yesterday = new Date();
@@ -621,12 +622,23 @@ export default function (app: ServerAPI): SignalKPlugin {
       );
 
       try {
-        // Export yesterday's data to daily Parquet files
+        // A delayed hourly timer or restart must not leave yesterday's last
+        // hour out of the daily compacted file.
         if (state.exportService) {
-          const result =
-            await state.exportService.exportDayToParquet(yesterday);
+          const result = await state.exportService.exportAllUnexported();
+          if (result.errors.length) {
+            throw new Error(
+              `Hourly export had ${result.errors.length} error(s)`
+            );
+          }
+          const compacted = await state.exportService.compactDay(yesterday);
+          if (compacted.errors.length) {
+            throw new Error(
+              `Daily compaction had ${compacted.errors.length} error(s)`
+            );
+          }
           app.debug(
-            `[DailyExport] Exported ${result.recordsExported} records to ${result.filesCreated.length} files`
+            `[DailyExport] Exported ${result.recordsExported} records; compacted ${compacted.filesCompacted} path/day groups`
           );
 
           // Run aggregation after daily export if Hive partitioning is enabled.
@@ -772,13 +784,50 @@ export default function (app: ServerAPI): SignalKPlugin {
       );
     }, msUntilDailyExport);
 
+    // Export each just-completed UTC hour. An extra five seconds avoids
+    // racing an update timestamped at the hour boundary.
+    const msUntilHourlyExport = 3600000 - (Date.now() % 3600000) + 5000;
+    const runHourlyExport = async () => {
+      if (state.isStopping || !state.exportService) return;
+      try {
+        const result = await state.exportService.exportAllUnexported();
+        if (result.errors.length)
+          app.error(`[HourlyExport] ${result.errors.join('; ')}`);
+        else
+          app.debug(
+            `[HourlyExport] Exported ${result.recordsExported} records`
+          );
+      } catch (error) {
+        app.error(`[HourlyExport] ${(error as Error).message}`);
+      }
+    };
+    state.hourlyExportTimeout = setTimeout(() => {
+      state.hourlyExportTimeout = undefined;
+      void runHourlyExport();
+      state.hourlyExportInterval = setInterval(runHourlyExport, 3600000);
+    }, msUntilHourlyExport);
+
     // Run startup export for ALL unexported records (catches up after downtime)
     state.startupExportTimeout = setTimeout(async () => {
       state.startupExportTimeout = undefined;
       if (state.isStopping) return;
       if (state.exportService) {
         try {
+          await state.exportService.recoverStrandedCompactions();
           const result = await state.exportService.exportAllUnexported();
+          if (result.errors.length) {
+            app.error(
+              `[StartupExport] ${result.errors.length} hourly export error(s); affected files remain pending in SQLite`
+            );
+          }
+          for (const day of await state.exportService.getDaysNeedingCompaction()) {
+            const compacted = await state.exportService.compactDay(day);
+            if (compacted.errors.length) {
+              app.error(
+                `[StartupCompaction] ${day.toISOString().slice(0, 10)}: ${compacted.errors.join('; ')}`
+              );
+            }
+          }
           if (result.recordsExported > 0) {
             app.debug(
               `[StartupExport] Exported ${result.recordsExported} records to ${result.filesCreated.length} files`
@@ -1011,6 +1060,8 @@ export default function (app: ServerAPI): SignalKPlugin {
       clearTimeout(state.dailyExportTimeout);
       state.dailyExportTimeout = undefined;
     }
+    if (state.hourlyExportTimeout) clearTimeout(state.hourlyExportTimeout);
+    if (state.hourlyExportInterval) clearInterval(state.hourlyExportInterval);
     if (state.startupExportTimeout) {
       clearTimeout(state.startupExportTimeout);
       state.startupExportTimeout = undefined;
@@ -1267,6 +1318,13 @@ export default function (app: ServerAPI): SignalKPlugin {
         description:
           'Automatically configure paths for recording when historical data is requested but not available',
         properties: {
+          captureAllLivePaths: {
+            type: 'boolean',
+            title: 'Capture all live Signal K paths',
+            description:
+              'Subscribe to every live context and path proactively, without waiting for a history query. Include/exclude patterns still apply. Higher-volume AIS data can substantially increase storage.',
+            default: false,
+          },
           enabled: {
             type: 'boolean',
             title: 'Enable auto-discovery',

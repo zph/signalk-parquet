@@ -10,10 +10,10 @@ Vessel data Parquet file archive with automated value and geospatial triggers. H
 
 ### Core Data Management
 - **Smart Data Types**: Intelligent Parquet schema detection preserves native data types (DOUBLE, BOOLEAN) instead of forcing everything to strings
-- **Daily Export Pipeline**: Simplified daily export creates consolidated Parquet files directly
-  - Data accumulates in SQLite buffer throughout the day
-  - Single export at configurable hour (default: 4 AM UTC)
-  - No separate consolidation step needed
+- **Hourly Export and Daily Compaction**: Completed hours leave SQLite promptly, then daily files are sorted and compressed with Zstd
+  - Current-hour data stays queryable in SQLite
+  - Daily compaction, aggregation, and upload run at the configured UTC hour
+  - A renewable lockfile prevents concurrent archive writers
 - **SQLite WAL Buffering**: Crash-safe data ingestion with Write-Ahead Logging
   - Replaces in-memory buffers with persistent SQLite database
   - Automatic recovery after power loss or crashes
@@ -216,8 +216,8 @@ Configure basic plugin settings (path configuration is managed separately in the
 | **Filename Prefix** | Prefix for generated filenames | `signalk_data` |
 | **File Format** | Output format (parquet, json, csv) | `parquet` |
 | **Raw Parquet Compression** | Compression for raw-tier Parquet files (`SNAPPY` or `UNCOMPRESSED`) | `SNAPPY` |
-| **Retention Days** | Days to keep processed files | 7 |
-| **Daily Export Hour** | Hour (0-23 UTC) to run daily Parquet export | 4 |
+| **Retention Days** | Days to keep raw files (`0` means forever) | 0 |
+| **Daily Export Hour** | Hour (0-23 UTC) for daily compaction, aggregation, and upload; completed hours export automatically | 4 |
 | **Export Batch Size** | Max records to export per cycle (1,000-200,000) | 50000 |
 | **Buffer Retention Hours** | How long to keep exported records in SQLite (hours) | 48 |
 | **Enable Raw SQL** | Enable /api/query endpoint for raw SQL queries | `false` |
@@ -229,6 +229,7 @@ Configure automatic path discovery when querying unconfigured paths:
 | Setting | Description | Default |
 |---------|-------------|---------|
 | **Enable Auto-Discovery** | Master switch for auto-discovery | `false` |
+| **Capture All Live Paths** | Subscribe to all contexts and paths without waiting for a History API query; preferred source only; include/exclude patterns apply | `false` |
 | **Require Live Data** | Only configure if path has live SignalK data | `true` |
 | **Max Auto-Configured Paths** | Maximum number of auto-configured paths | `100` |
 | **Include Patterns** | Glob patterns for paths to include (e.g., `navigation.*`) | `[]` |
@@ -241,6 +242,20 @@ When enabled, Auto-Discovery will automatically add path configurations when:
 4. The path has live data in SignalK (if `requireLiveData` is enabled)
 
 Auto-discovered paths are marked with the `autoDiscovered: true` flag and have auto-generated human-readable names prefixed with `[Auto]`.
+
+With `autoDiscovery.captureAllLivePaths: true`, the plugin instead records every matching live path immediately. This mode does not create one saved path configuration per discovered path, and `maxAutoConfiguredPaths` does not limit it. It removes the prior one-second per-path debounce so updates from different AIS vessels are not silently dropped. Expect substantially more SQLite writes and archive data.
+
+To keep derived CPA data temporarily while retaining raw navigation data indefinitely, configure a path override, for example:
+
+```json
+{
+  "pathRetentionOverrides": [
+    { "pattern": "navigation.closestApproach", "days": 3, "skipAggregation": true }
+  ]
+}
+```
+
+This retains CPA's raw Parquet files for three days and omits longer-lived 5s/60s/1h aggregate tiers. It is a retention class, not a separate physical `tier=derived` directory. To omit CPA entirely from proactive capture, add `navigation.closestApproach` to `autoDiscovery.excludePatterns`; explicitly configured paths still record when proactive capture is off. File retention runs only after successful daily aggregation and any configured upload, so expiration may be delayed during failures.
 
 ### Cloud Upload Configuration
 
@@ -1401,15 +1416,15 @@ marine-data/tier=raw/context=vessels__self/path=navigation__position/year=2026/d
 
 ## Daily Export
 
-The plugin uses a simplified daily export pipeline:
+The plugin uses an hourly export and daily compaction pipeline:
 
-1. **Data Collection**: SignalK data is buffered in crash-safe SQLite WAL database
-2. **Daily Export**: At configurable hour (default: 4 AM UTC), exports previous day's data
-3. **Direct Consolidation**: Creates one Parquet file per context/path/day (no separate merge step)
-4. **Timestamped Files**: Each export uses current timestamp for unique filenames
+1. **Data Collection**: Signal K data is buffered in crash-safe SQLite WAL database
+2. **Hourly Export**: Just after each UTC hour, exports completed-hour data per context/path and marks SQLite rows exported only after the file is published
+3. **Daily Compaction**: At the configured UTC hour (default: 4 AM), merges each previous-day context/path group, sorted by event then receive timestamp, into Zstd-3 Parquet
+4. **Lease**: A renewable `.parquet-export.lock` prevents concurrent writers; interrupted compactions restore unpublished source files on restart
 5. **S3 Upload**: Uploads daily files if configured
 
-**Note**: The previous 5-minute interval export and separate consolidation step have been removed. This simplifies the pipeline and creates cleaner daily files directly.
+The SQLite buffer remains available for current-hour History API queries. The lockfile protects local writers; it does not lock readers or provide a distributed lock for shared network storage.
 
 ## Startup Sequence
 

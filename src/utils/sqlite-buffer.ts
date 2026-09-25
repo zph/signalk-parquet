@@ -866,6 +866,119 @@ export class SQLiteBuffer {
     return Array.from(allDates).sort();
   }
 
+  /** Completed UTC hours with pending data, including backlog after downtime. */
+  getHoursWithUnexportedRecords(before: Date = new Date()): string[] {
+    if (!this._open) return [];
+    const cutoff = new Date(before);
+    cutoff.setUTCMinutes(0, 0, 0);
+    const cutoffIso = cutoff.toISOString();
+    const hours = new Set<string>();
+    for (const [, info] of this.tableMap) {
+      const rows = this.db
+        .prepare(
+          `
+        SELECT DISTINCT substr(received_timestamp, 1, 13) AS hour
+        FROM ${info.tableName}
+        WHERE exported = 0 AND received_timestamp < ?
+      `
+        )
+        .all(cutoffIso) as Array<{ hour: string }>;
+      for (const row of rows) hours.add(row.hour);
+    }
+    return [...hours].sort();
+  }
+
+  private hourBounds(hour: Date): [string, string] {
+    const start = new Date(hour);
+    start.setUTCMinutes(0, 0, 0);
+    return [
+      start.toISOString(),
+      new Date(start.getTime() + 3600000).toISOString(),
+    ];
+  }
+
+  getPathsForHour(hour: Date): Array<{ context: string; path: string }> {
+    if (!this._open) return [];
+    const [start, end] = this.hourBounds(hour);
+    const result: Array<{ context: string; path: string }> = [];
+    for (const [signalkPath, info] of this.tableMap) {
+      const rows = this.db
+        .prepare(
+          `
+        SELECT DISTINCT context FROM ${info.tableName}
+        WHERE received_timestamp >= ? AND received_timestamp < ? AND exported = 0
+      `
+        )
+        .all(start, end) as Array<{ context: string }>;
+      for (const row of rows)
+        result.push({ context: row.context, path: signalkPath });
+    }
+    return result.sort(
+      (a, b) =>
+        a.context.localeCompare(b.context) || a.path.localeCompare(b.path)
+    );
+  }
+
+  getRecordCountForPathAndHour(
+    context: string,
+    signalkPath: string,
+    hour: Date
+  ): number {
+    const info = this.tableMap.get(signalkPath);
+    if (!this._open || !info) return 0;
+    const [start, end] = this.hourBounds(hour);
+    const row = this.db
+      .prepare(
+        `
+      SELECT COUNT(*) AS cnt FROM ${info.tableName}
+      WHERE context = ? AND received_timestamp >= ? AND received_timestamp < ? AND exported = 0
+    `
+      )
+      .get(context, start, end) as { cnt: number };
+    return row.cnt;
+  }
+
+  getRecordsForPathAndHourBatched(
+    context: string,
+    signalkPath: string,
+    hour: Date,
+    limit: number,
+    offset: number
+  ): DataRecord[] {
+    const info = this.tableMap.get(signalkPath);
+    if (!this._open || !info) return [];
+    const [start, end] = this.hourBounds(hour);
+    const rows = this.db
+      .prepare(
+        `
+      SELECT * FROM ${info.tableName}
+      WHERE context = ? AND received_timestamp >= ? AND received_timestamp < ? AND exported = 0
+      ORDER BY received_timestamp ASC, id ASC LIMIT ? OFFSET ?
+    `
+      )
+      .all(context, start, end, limit, offset) as BufferRecord[];
+    return rows.map(row => this.bufferRecordToDataRecord(row, signalkPath));
+  }
+
+  markHourExported(
+    context: string,
+    signalkPath: string,
+    hour: Date,
+    batchId: string
+  ): void {
+    const info = this.tableMap.get(signalkPath);
+    if (!this._open || !info) return;
+    const [start, end] = this.hourBounds(hour);
+    this.db
+      .prepare(
+        `
+      UPDATE ${info.tableName} SET exported = 1, export_batch_id = ?
+      WHERE context = ? AND received_timestamp >= ? AND received_timestamp < ? AND exported = 0
+    `
+      )
+      .run(batchId, context, start, end);
+  }
+
   /**
    * Get distinct context/path combinations for a specific date (UTC).
    * Scans all per-path tables.

@@ -180,6 +180,70 @@ describe('delta ingestion and regimen control', () => {
     expect(buffer.getStats().pendingRecords).to.equal(1);
   });
 
+  it('does not debounce successive updates on the same path from different vessels', () => {
+    const paths = asPaths([
+      {
+        path: 'navigation.closestApproach',
+        enabled: true,
+        context: 'vessels.*',
+      },
+    ]);
+    updateDataSubscriptions(paths, state, config, host.app);
+    host.emitBus(
+      'navigation.closestApproach',
+      dataDelta('navigation.closestApproach', 100, { context: 'vessels.one' })
+    );
+    host.emitBus(
+      'navigation.closestApproach',
+      dataDelta('navigation.closestApproach', 200, { context: 'vessels.two' })
+    );
+    expect(buffer.getStats().pendingRecords).to.equal(2);
+  });
+
+  it('captures all live paths proactively without a history query', () => {
+    config.autoDiscovery = {
+      enabled: true,
+      captureAllLivePaths: true,
+      requireLiveData: false,
+      excludePatterns: ['notifications.*'],
+    };
+    updateDataSubscriptions([], state, config, host.app);
+    host.emitCommand({
+      context: 'vessels.one',
+      updates: [
+        {
+          timestamp: NOW,
+          $source: 'ais',
+          values: [
+            {
+              path: 'navigation.position',
+              value: { latitude: 1, longitude: 2 },
+            },
+            { path: 'notifications.warning', value: 'excluded' },
+          ],
+        },
+      ],
+    });
+    host.emitCommand({
+      context: 'vessels.two',
+      updates: [
+        {
+          timestamp: NOW,
+          $source: 'ais',
+          values: [
+            {
+              path: 'navigation.position',
+              value: { latitude: 3, longitude: 4 },
+            },
+          ],
+        },
+      ],
+    });
+    expect(buffer.getKnownPaths().has('navigation.position')).to.equal(true);
+    expect(buffer.getKnownPaths().has('notifications.warning')).to.equal(false);
+    expect(buffer.getStats().pendingRecords).to.equal(2);
+  });
+
   it('does not collect a regimen-gated path until its command turns on', () => {
     updateDataSubscriptions(PATHS, state, config, host.app);
 

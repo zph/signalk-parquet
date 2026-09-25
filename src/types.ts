@@ -37,6 +37,7 @@ export interface SignalKPlugin {
 // Auto-discovery configuration for automatic path recording
 export interface AutoDiscoveryConfig {
   enabled: boolean; // Master switch (default: false)
+  captureAllLivePaths?: boolean; // Subscribe to all live paths without a history query
   excludePatterns?: string[]; // Paths to never auto-configure (glob patterns)
   includePatterns?: string[]; // Restrict to matching paths only (glob patterns)
   maxAutoConfiguredPaths?: number; // Limit (default: 100)
@@ -591,6 +592,18 @@ export interface ParquetExportServiceInterface {
     duration: number;
     errors: string[];
   }>;
+  exportHourToParquet(targetHour: Date): Promise<{
+    batchId: string;
+    recordsExported: number;
+    filesCreated: string[];
+    duration: number;
+    errors: string[];
+  }>;
+  compactDay(
+    targetDay: Date
+  ): Promise<{ filesCompacted: number; errors: string[] }>;
+  recoverStrandedCompactions(): Promise<void>;
+  getDaysNeedingCompaction(): Promise<Date[]>;
   // Daily export methods
   exportDayToParquet(targetDate: Date): Promise<{
     batchId: string;
@@ -614,7 +627,7 @@ export interface ParquetExportServiceInterface {
     totalExported: number;
     pendingRecords: number;
     dailyExportHour: number;
-    mode: 'daily';
+    mode: 'hourly';
   };
   getHealth(): {
     healthy: boolean;
@@ -636,6 +649,8 @@ export interface PluginState {
   // One-shot timers armed in start(); tracked so stop() can cancel work
   // that hasn't fired yet.
   dailyExportTimeout?: NodeJS.Timeout;
+  hourlyExportTimeout?: NodeJS.Timeout;
+  hourlyExportInterval?: NodeJS.Timeout;
   startupExportTimeout?: NodeJS.Timeout;
   // Forked aggregation workers currently running; stop() asks each to
   // cancel cooperatively (the in-flight COPY finishes, the run reports as

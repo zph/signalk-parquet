@@ -2,6 +2,7 @@ import * as fs from 'fs-extra';
 import * as path from 'path';
 import { glob as globOriginal } from 'glob';
 import { promisify } from 'util';
+import { minimatch } from 'minimatch';
 
 // Wrap glob for compatibility with both glob@7.x (callbacks) and glob@11.x (promises)
 const glob = async (pattern: string, options?: object): Promise<string[]> => {
@@ -463,6 +464,66 @@ export function updateDataSubscriptions(
   // Re-subscribe to command paths
   subscribeToCommandPaths(currentPaths, state, config, app);
 
+  // Proactive fleet capture uses one wildcard subscription instead of a
+  // per-path stream. It preserves every preferred-source value, including
+  // distinct AIS contexts that share a path; no cross-vessel debounce.
+  if (
+    config.autoDiscovery?.enabled &&
+    config.autoDiscovery.captureAllLivePaths
+  ) {
+    const discovery = config.autoDiscovery;
+    app.subscriptionmanager.subscribe(
+      {
+        context: '*' as Context,
+        subscribe: [
+          { path: '*' as Path, policy: 'instant' as const, minPeriod: 0 },
+        ],
+        sourcePolicy: 'preferred' as const,
+      },
+      state.unsubscribes,
+      error => app.error(`[CaptureAll] Subscription error: ${String(error)}`),
+      (delta: Delta) => {
+        for (const update of delta.updates || []) {
+          if (!hasValues(update)) continue;
+          for (const value of update.values) {
+            const signalkPath = value.path;
+            if (!signalkPath || signalkPath.startsWith('commands.')) continue;
+            if (
+              discovery.excludePatterns?.some(pattern =>
+                minimatch(signalkPath, pattern)
+              )
+            )
+              continue;
+            if (
+              discovery.includePatterns?.length &&
+              !discovery.includePatterns.some(pattern =>
+                minimatch(signalkPath, pattern)
+              )
+            )
+              continue;
+            const normalized = {
+              context: delta.context || 'vessels.self',
+              path: signalkPath,
+              value: value.value,
+              timestamp: update.timestamp,
+              source: update.source,
+              $source: update.$source,
+            } as NormalizedDelta;
+            handleStreamData(
+              normalized,
+              { path: signalkPath },
+              config,
+              state,
+              app
+            );
+            state.subscribedPaths.add(signalkPath);
+          }
+        }
+      }
+    );
+    return;
+  }
+
   // Now subscribe to data paths using currentPaths
   const dataPaths = currentPaths.filter(
     (pathConfig: PathConfig) =>
@@ -571,7 +632,6 @@ export function updateDataSubscriptions(
             (pc: PathConfig) => valueObj[pc.path] !== undefined
           );
         })
-        .debounceImmediate(5000) // Root properties are static, debounce aggressively
         .onValue((normalizedDelta: NormalizedDelta) => {
           const valueObj = normalizedDelta.value as Record<string, unknown>;
           for (const [pathName, pathConfig] of rootPathMap) {
@@ -599,7 +659,6 @@ export function updateDataSubscriptions(
         .filter((normalizedDelta: NormalizedDelta) =>
           passesContextFilter(normalizedDelta, pathConfig)
         )
-        .debounceImmediate(1000)
         .onValue((normalizedDelta: NormalizedDelta) => {
           handleStreamData(normalizedDelta, pathConfig, config, state, app);
         });

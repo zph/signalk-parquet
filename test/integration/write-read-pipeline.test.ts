@@ -109,9 +109,9 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
     const uncompressedSchema =
       await uncompressedWriter.createParquetSchema(records);
     expect(
-      Object.values(
-        snappySchema.fields as Record<string, ParquetField>
-      ).every(field => field.compression === ParquetCompression.SNAPPY)
+      Object.values(snappySchema.fields as Record<string, ParquetField>).every(
+        field => field.compression === ParquetCompression.SNAPPY
+      )
     ).to.equal(true);
     expect(
       Object.values(
@@ -163,6 +163,68 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
     expect(created).to.match(/year=2024/);
     expect(created).to.match(/day=153/); // 2024-06-01 is day 153 of a leap year
     expect(await fs.pathExists(created)).to.equal(true);
+  });
+
+  it('exports completed hours and compacts them into sorted Zstd daily files', async () => {
+    const signalkPath = 'navigation.speedOverGround';
+    const day = new Date(Date.now() - 72 * 3600000);
+    day.setUTCHours(0, 0, 0, 0);
+    const firstHour = new Date(day.getTime() + 10 * 3600000);
+    const secondHour = new Date(day.getTime() + 11 * 3600000);
+    buffer.insert(scalarRecord(signalkPath, 11, secondHour.toISOString()));
+    buffer.insert(scalarRecord(signalkPath, 9, firstHour.toISOString()));
+    const first = await exportService.exportHourToParquet(firstHour);
+    const second = await exportService.exportHourToParquet(secondHour);
+    expect(first.errors).to.deep.equal([]);
+    expect(second.errors).to.deep.equal([]);
+    expect(first.recordsExported + second.recordsExported).to.equal(2);
+    const compacted = await exportService.compactDay(day);
+    expect(compacted.errors).to.deep.equal([]);
+    expect(compacted.filesCompacted).to.equal(1);
+    const dir = path.dirname(first.filesCreated[0]);
+    const files = (await fs.readdir(dir)).filter(name =>
+      name.endsWith('.parquet')
+    );
+    expect(files).to.have.lengthOf(1);
+    expect(files[0]).to.match(/^daily_compact_/);
+    const conn = await DuckDBPool.getConnection();
+    try {
+      const result = await conn.runAndReadAll(
+        `SELECT value, signalk_timestamp FROM read_parquet('${toGlob(path.join(dir, files[0]))}') ORDER BY signalk_timestamp`
+      );
+      const rows = result.getRowObjects() as Array<{ value: string }>;
+      expect(rows.map(row => Number(row.value))).to.deep.equal([9, 11]);
+    } finally {
+      conn.disconnectSync();
+    }
+  });
+
+  it('restores source files after an interrupted daily compaction', async () => {
+    const hour = new Date(Date.now() - 72 * 3600000);
+    hour.setUTCHours(10, 0, 0, 0);
+    buffer.insert(
+      scalarRecord('navigation.speedOverGround', 9, hour.toISOString())
+    );
+    const exported = await exportService.exportHourToParquet(hour);
+    const source = exported.filesCreated[0];
+    const dir = path.dirname(source);
+    const trash = path.join(dir, '.daily-compaction-trash-interrupted');
+    await fs.ensureDir(trash);
+    await fs.rename(source, path.join(trash, path.basename(source)));
+    await exportService.recoverStrandedCompactions();
+    expect(await fs.pathExists(source)).to.equal(true);
+    expect(await fs.pathExists(trash)).to.equal(false);
+  });
+
+  it('catches up only completed hours, leaving the current hour queryable in SQLite', async () => {
+    const old = new Date(Date.now() - 2 * 3600000).toISOString();
+    const current = new Date().toISOString();
+    buffer.insert(scalarRecord('navigation.speedOverGround', 1, old));
+    buffer.insert(scalarRecord('navigation.speedOverGround', 2, current));
+    const exported = await exportService.exportAllUnexported();
+    expect(exported.errors).to.deep.equal([]);
+    expect(exported.recordsExported).to.equal(1);
+    expect(buffer.getStats().pendingRecords).to.equal(1);
   });
 
   it('reads exported scalar values back through DuckDB', async () => {
