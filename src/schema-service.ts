@@ -2,6 +2,7 @@ import * as fs from 'fs-extra';
 import * as path from 'path';
 import { ServerAPI } from '@signalk/server-api';
 import { DataRecord, ParquetCompression } from './types';
+import './utils/zstd-parquet-codec';
 
 // Import parquet dynamically
 let parquet: any;
@@ -48,7 +49,7 @@ export class SchemaService {
 
   constructor(
     app: ServerAPI,
-    compression: ParquetCompression = ParquetCompression.SNAPPY
+    compression: ParquetCompression = ParquetCompression.ZSTD
   ) {
     this.app = app;
     this.compression = compression;

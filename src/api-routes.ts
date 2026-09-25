@@ -1,5 +1,6 @@
 import * as fs from 'fs-extra';
 import * as path from 'path';
+import './utils/zstd-parquet-codec';
 import { globIn } from './utils/glob-in';
 import express, { Router } from 'express';
 import multer from 'multer';
@@ -3343,7 +3344,7 @@ export function registerApiRoutes(
                 app,
                 compression:
                   state.currentConfig?.parquetCompression ??
-                  ParquetCompression.SNAPPY,
+                  ParquetCompression.ZSTD,
               });
               const correctedSchema = await writer.createParquetSchema(
                 records,

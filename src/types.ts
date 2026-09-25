@@ -755,8 +755,7 @@ export enum CommandStatus {
 // Utility Types
 export type FileFormat = 'json' | 'csv' | 'parquet';
 export enum ParquetCompression {
-  SNAPPY = 'SNAPPY',
-  UNCOMPRESSED = 'UNCOMPRESSED',
+  ZSTD = 'ZSTD',
 }
 export type UploadTiming = 'realtime' | 'consolidation';
 export type BufferKey = string; // Format: "context:path"

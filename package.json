@@ -6,6 +6,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
+    "reencode:zstd": "node dist/cli/reencode-zstd.js",
     "watch": "tsc --watch",
     "clean": "rm -rf dist",
     "prepublishOnly": "npm run build",

@@ -85,7 +85,7 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
     await host?.cleanup();
   });
 
-  it('writes Snappy raw files by default and reads them with uncompressed files', async () => {
+  it('writes ZSTD raw files and reads them through DuckDB', async () => {
     const records = Array.from({ length: 1000 }, (_, index) =>
       scalarRecord(
         'navigation.speedOverGround',
@@ -93,46 +93,33 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
         new Date(DAY.getTime() + index * 1000).toISOString()
       )
     );
-    const snappyPath = path.join(host.dataDir, 'snappy.parquet');
-    const uncompressedPath = path.join(host.dataDir, 'uncompressed.parquet');
-    const snappyWriter = new ParquetWriter({
+    const zstdPath = path.join(host.dataDir, 'zstd.parquet');
+    const writer = new ParquetWriter({
       format: 'parquet',
       app: host.app,
     });
-    const uncompressedWriter = new ParquetWriter({
-      format: 'parquet',
-      app: host.app,
-      compression: ParquetCompression.UNCOMPRESSED,
-    });
-
-    const snappySchema = await snappyWriter.createParquetSchema(records);
-    const uncompressedSchema =
-      await uncompressedWriter.createParquetSchema(records);
+    const schema = await writer.createParquetSchema(records);
     expect(
-      Object.values(snappySchema.fields as Record<string, ParquetField>).every(
-        field => field.compression === ParquetCompression.SNAPPY
+      Object.values(schema.fields as Record<string, ParquetField>).every(
+        field => field.compression === ParquetCompression.ZSTD
       )
     ).to.equal(true);
-    expect(
-      Object.values(
-        uncompressedSchema.fields as Record<string, ParquetField>
-      ).every(field => field.compression === ParquetCompression.UNCOMPRESSED)
-    ).to.equal(true);
-
-    await snappyWriter.writeRecords(snappyPath, records);
-    await uncompressedWriter.writeRecords(uncompressedPath, records);
+    await writer.writeRecords(zstdPath, records);
 
     const conn = await DuckDBPool.getConnection();
     try {
       const res = await conn.runAndReadAll(
         `SELECT COUNT(*) AS n
-         FROM read_parquet(['${toGlob(snappyPath)}', '${toGlob(uncompressedPath)}'])`
+         FROM read_parquet('${toGlob(zstdPath)}')`
       );
       const row = res.getRowObjects()[0] as { n: bigint };
-      expect(Number(row.n)).to.equal(records.length * 2);
-      expect((await fs.stat(snappyPath)).size).to.be.lessThan(
-        (await fs.stat(uncompressedPath)).size
+      expect(Number(row.n)).to.equal(records.length);
+      const codecs = await conn.runAndReadAll(
+        `SELECT DISTINCT compression FROM parquet_metadata('${toGlob(zstdPath)}')`
       );
+      expect(
+        codecs.getRowObjects().map(codec => codec.compression)
+      ).to.deep.equal(['ZSTD']);
     } finally {
       conn.disconnectSync();
     }
@@ -178,6 +165,19 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
     expect(first.errors).to.deep.equal([]);
     expect(second.errors).to.deep.equal([]);
     expect(first.recordsExported + second.recordsExported).to.equal(2);
+    const hourlyConn = await DuckDBPool.getConnection();
+    try {
+      for (const file of [...first.filesCreated, ...second.filesCreated]) {
+        const metadata = await hourlyConn.runAndReadAll(
+          `SELECT DISTINCT compression FROM parquet_metadata('${toGlob(file)}')`
+        );
+        expect(
+          metadata.getRowObjects().map(row => row.compression)
+        ).to.deep.equal(['ZSTD']);
+      }
+    } finally {
+      hourlyConn.disconnectSync();
+    }
     const compacted = await exportService.compactDay(day);
     expect(compacted.errors).to.deep.equal([]);
     expect(compacted.filesCompacted).to.equal(1);
@@ -194,6 +194,12 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
       );
       const rows = result.getRowObjects() as Array<{ value: string }>;
       expect(rows.map(row => Number(row.value))).to.deep.equal([9, 11]);
+      const metadata = await conn.runAndReadAll(
+        `SELECT DISTINCT compression FROM parquet_metadata('${toGlob(path.join(dir, files[0]))}')`
+      );
+      expect(
+        metadata.getRowObjects().map(row => row.compression)
+      ).to.deep.equal(['ZSTD']);
     } finally {
       conn.disconnectSync();
     }

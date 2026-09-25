@@ -233,7 +233,7 @@ export function makeTestConfig(
     filenamePrefix: 'signalk_data',
     retentionDays: 0,
     fileFormat: 'parquet' as const,
-    parquetCompression: ParquetCompression.SNAPPY,
+    parquetCompression: ParquetCompression.ZSTD,
     vesselMMSI: '368204530',
     cloudUpload: { provider: 'none' as const },
     homePortLatitude: 0,

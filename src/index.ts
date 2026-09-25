@@ -298,10 +298,7 @@ export default function (app: ServerAPI): SignalKPlugin {
       ),
       configSchemaVersion: 1,
       fileFormat: options?.fileFormat || 'parquet',
-      parquetCompression:
-        options?.parquetCompression === ParquetCompression.UNCOMPRESSED
-          ? ParquetCompression.UNCOMPRESSED
-          : ParquetCompression.SNAPPY,
+      parquetCompression: ParquetCompression.ZSTD,
       vesselMMSI: vesselMMSI,
       cloudUpload: (() => {
         // New config format already present
@@ -1237,12 +1234,12 @@ export default function (app: ServerAPI): SignalKPlugin {
       },
       parquetCompression: {
         type: 'string',
-        title: 'Raw Parquet Compression',
+        title: 'Parquet Compression',
         description:
-          'Compression for raw-tier Parquet files. Snappy is recommended for substantially lower storage use with fast reads and writes. Existing uncompressed files remain readable alongside compressed files. Aggregated tiers already use Snappy.',
+          'All newly written Parquet files use ZSTD level 3. Legacy Snappy and uncompressed files remain readable.',
         enum: Object.values(ParquetCompression),
-        enumNames: ['Snappy (recommended)', 'Uncompressed'],
-        default: ParquetCompression.SNAPPY,
+        enumNames: ['ZSTD level 3 (required)'],
+        default: ParquetCompression.ZSTD,
       },
       retentionDays: {
         type: 'integer',

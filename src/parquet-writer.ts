@@ -8,6 +8,7 @@ import {
 } from './types';
 import { ServerAPI } from '@signalk/server-api';
 import { SchemaService } from './schema-service';
+import './utils/zstd-parquet-codec';
 
 // Try to import ParquetJS, fall back if not available
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -30,10 +31,7 @@ export class ParquetWriter {
 
     // Initialize schema service if app is available
     if (this.app) {
-      this.schemaService = new SchemaService(
-        this.app,
-        options.compression ?? ParquetCompression.SNAPPY
-      );
+      this.schemaService = new SchemaService(this.app, ParquetCompression.ZSTD);
     }
   }
 

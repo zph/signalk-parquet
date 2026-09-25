@@ -215,12 +215,27 @@ Configure basic plugin settings (path configuration is managed separately in the
 | **Output Directory** | Directory to save data files | SignalK data directory |
 | **Filename Prefix** | Prefix for generated filenames | `signalk_data` |
 | **File Format** | Output format (parquet, json, csv) | `parquet` |
-| **Raw Parquet Compression** | Compression for raw-tier Parquet files (`SNAPPY` or `UNCOMPRESSED`) | `SNAPPY` |
+| **Parquet Compression** | All new raw and aggregated Parquet files use ZSTD level 3; legacy files remain readable | `ZSTD` |
 | **Retention Days** | Days to keep raw files (`0` means forever) | 0 |
 | **Daily Export Hour** | Hour (0-23 UTC) for daily compaction, aggregation, and upload; completed hours export automatically | 4 |
 | **Export Batch Size** | Max records to export per cycle (1,000-200,000) | 50000 |
 | **Buffer Retention Hours** | How long to keep exported records in SQLite (hours) | 48 |
 | **Enable Raw SQL** | Enable /api/query endpoint for raw SQL queries | `false` |
+
+New hourly raw, aggregated, and compacted Parquet files use ZSTD level 3.
+The plugin requires a Node.js runtime with native ZSTD support. Existing
+Snappy or uncompressed files remain readable, but are not rewritten merely
+by upgrading. To re-encode an existing archive without changing its rows:
+
+```sh
+npm run build
+npm run reencode:zstd -- /path/to/signalk-parquet
+npm run reencode:zstd -- /path/to/signalk-parquet --apply
+```
+
+The first command is a dry run. The apply command takes the archive lease,
+verifies each replacement's rows and ZSTD footer, and atomically replaces
+active Parquet files. It is safe to retry after interruption.
 
 ### Auto-Discovery Configuration
 
