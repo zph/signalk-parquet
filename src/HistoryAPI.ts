@@ -32,6 +32,7 @@ import {
 } from './utils/context-discovery';
 import { getPathComponentSchema, ComponentInfo } from './utils/schema-cache';
 import { ConcurrencyLimiter } from './utils/concurrency-limiter';
+import { S3ReadCache } from './utils/s3-read-cache';
 import { CONCURRENCY } from './config/cache-defaults';
 import { SQLiteBufferInterface } from './types';
 import { HivePathBuilder, AggregationTier } from './utils/hive-path-builder';
@@ -512,6 +513,11 @@ export interface S3QueryConfig {
   bucket: string;
   keyPrefix: string;
   region: string;
+  client?: any;
+  cacheDirectory?: string;
+  cacheMaxMB?: number;
+  /** Prevent cache reuse across different cloud endpoints or namespaces. */
+  cacheNamespace?: string;
 }
 
 /**
@@ -769,6 +775,7 @@ export class HistoryAPI {
   private hivePathBuilder: HivePathBuilder;
   private autoDiscoveryService?: AutoDiscoveryService;
   private s3Config?: S3QueryConfig;
+  private s3ReadCache?: S3ReadCache;
   // Mirrors AggregationService's rule set so the read path can fall
   // back to tier=raw for skipAggregation paths. The aggregation
   // pipeline doesn't write 5s/60s/1h files for those, so a higher-
@@ -788,6 +795,13 @@ export class HistoryAPI {
     this.hivePathBuilder = new HivePathBuilder();
     this.autoDiscoveryService = autoDiscoveryService;
     this.s3Config = s3Config;
+    this.s3ReadCache = s3Config?.cacheDirectory
+      ? new S3ReadCache(
+          s3Config.cacheDirectory,
+          Math.max(0, s3Config.cacheMaxMB ?? 512) * 1024 * 1024,
+          s3Config.cacheNamespace
+        )
+      : undefined;
     this.retentionRules = new RetentionRuleSet(pathRetentionOverrides || []);
   }
 
@@ -796,6 +810,46 @@ export class HistoryAPI {
    */
   setS3Config(config: S3QueryConfig | undefined): void {
     this.s3Config = config;
+    this.s3ReadCache = config?.cacheDirectory
+      ? new S3ReadCache(
+          config.cacheDirectory,
+          Math.max(0, config.cacheMaxMB ?? 512) * 1024 * 1024,
+          config.cacheNamespace
+        )
+      : undefined;
+  }
+
+  private async getCachedS3Files(
+    config: S3QueryConfig,
+    tier: AggregationTier,
+    context: string,
+    signalkPath: string,
+    from: Date,
+    to: Date
+  ): Promise<{ source: string | null; incomplete: boolean }> {
+    if (!config.client || !this.s3ReadCache)
+      return { source: null, incomplete: true };
+    const prefix = [
+      config.keyPrefix.replace(/\/$/, ''),
+      `tier=${tier}`,
+      `context=${this.hivePathBuilder.sanitizeContext(context)}`,
+      `path=${this.hivePathBuilder.sanitizePath(signalkPath)}`,
+    ]
+      .filter(Boolean)
+      .join('/');
+    const result = await this.s3ReadCache.listAndCache(
+      config.client,
+      config.bucket,
+      prefix,
+      from,
+      to
+    );
+    return {
+      source: result.files.length
+        ? `cachelist:${JSON.stringify(result.files)}`
+        : null,
+      incomplete: result.incomplete,
+    };
   }
 
   /**
@@ -1185,9 +1239,15 @@ export class HistoryAPI {
         // Add meta to response if any paths were auto-configured
         if (autoConfiguredPaths.length > 0) {
           allResult.meta = {
+            ...allResult.meta,
             autoConfigured: true,
             paths: autoConfiguredPaths.map(r => r.path),
-            message: `${autoConfiguredPaths.length} path(s) auto-configured for recording. Data will be available shortly.`,
+            message: [
+              allResult.meta?.message,
+              `${autoConfiguredPaths.length} path(s) auto-configured for recording. Data will be available shortly.`,
+            ]
+              .filter(Boolean)
+              .join(' '),
           };
         }
       }
@@ -1270,6 +1330,7 @@ export class HistoryAPI {
     // with different sources/aggregates keeps separate series.
     const allData: { [key: string]: Array<[Timestamp, unknown]> } = {};
     const objectPaths = new Set<string>(); // Track which paths are object paths
+    const historyWarnings = new Set<string>();
 
     // Convert ZonedDateTime to Date for S3 pattern building
     const fromDate = new Date(from.toInstant().toString());
@@ -1564,6 +1625,11 @@ export class HistoryAPI {
 
         // S3 supplements local for dates before the earliest local data
         if (s3Config?.enabled) {
+          if ((s3Config.cacheMaxMB ?? 512) <= 0) {
+            historyWarnings.add(
+              'Cloud history is enabled, but the local S3 read cache is disabled; older cloud-only history was not queried.'
+            );
+          }
           // Find the earliest local data date
           const localEarliestDate = this.hivePathBuilder.findEarliestDate(
             dataDir,
@@ -1576,30 +1642,43 @@ export class HistoryAPI {
             // Only query S3 for the range before local data starts
             const s3ToDate = new Date(localEarliestDate.getTime() - 86400000); // day before local starts
             if (fromDate <= s3ToDate) {
-              s3FilePath = this.hivePathBuilder.buildS3Glob(
-                s3Config.bucket,
-                s3Config.keyPrefix || '',
+              const cloudFiles = await this.getCachedS3Files(
+                s3Config,
                 effectiveTier,
-                partitionContext,
+                String(partitionContext),
                 pathSpec.path,
                 fromDate,
                 s3ToDate
               );
+              s3FilePath = cloudFiles.source;
+              if (cloudFiles.incomplete)
+                historyWarnings.add(
+                  `Some cloud files for ${pathSpec.path} are uncommitted, corrupt, or unavailable.`
+                );
               debug(
                 `S3 supplement for ${fromDate.toISOString()} to ${s3ToDate.toISOString()}`
               );
             }
           } else if (!localEarliestDate) {
             // No local data at all — query S3 for full range
-            s3FilePath = this.hivePathBuilder.buildS3Glob(
-              s3Config.bucket,
-              s3Config.keyPrefix || '',
+            localFilePath = null;
+            const cloudFiles = await this.getCachedS3Files(
+              s3Config,
               effectiveTier,
-              partitionContext,
+              String(partitionContext),
               pathSpec.path,
               fromDate,
               toDate
             );
+            s3FilePath = cloudFiles.source;
+            if (cloudFiles.incomplete)
+              historyWarnings.add(
+                `Some cloud files for ${pathSpec.path} are uncommitted, corrupt, or unavailable.`
+              );
+            if (!s3FilePath)
+              historyWarnings.add(
+                `No committed local or cloud history files were found for ${pathSpec.path} in the requested range.`
+              );
             debug(`No local data, querying S3 for full range`);
           }
         }
@@ -1631,10 +1710,20 @@ export class HistoryAPI {
           const buildFromClause = (filePath: string): string => {
             // Escape the path before splicing it into the SQL string literal.
             const fp = escapeSqlString(filePath);
-            const isS3 = filePath.startsWith('s3://');
             const aisFilter = isAisVesselContext(String(context))
               ? ` WHERE context = '${escapeSqlString(String(context))}'`
               : '';
+            if (filePath.startsWith('cachelist:')) {
+              const localFiles = JSON.parse(
+                filePath.slice('cachelist:'.length)
+              ) as string[];
+              const literals = localFiles
+                .map(item => `'${escapeSqlString(item)}'`)
+                .join(', ');
+              const read = `read_parquet([${literals}], union_by_name=true, filename=true, hive_partitioning=false)`;
+              return aisFilter ? `(SELECT * FROM ${read}${aisFilter})` : read;
+            }
+            const isS3 = filePath.startsWith('s3://');
             if (isS3) {
               return aisFilter
                 ? `(SELECT * FROM read_parquet('${fp}', union_by_name=true, filename=true, hive_partitioning=false)${aisFilter})`
@@ -1676,6 +1765,9 @@ export class HistoryAPI {
               return await connection.runAndReadAll(buildQuery(fromClause));
             } catch (err) {
               if (s3FilePath && localFromClause) {
+                historyWarnings.add(
+                  `Cloud history could not be read for ${pathSpec.path}; returned local data only.`
+                );
                 debug(
                   `Hybrid query failed, falling back to local-only: ${err}`
                 );
@@ -1724,32 +1816,47 @@ export class HistoryAPI {
                     rawEarliestDate.getTime() - 86400000
                   );
                   if (fromDate <= s3ToDate) {
-                    rawS3FilePath = this.hivePathBuilder.buildS3Glob(
-                      s3Config.bucket,
-                      s3Config.keyPrefix || '',
+                    const cloudFiles = await this.getCachedS3Files(
+                      s3Config,
                       'raw',
-                      partitionContext,
+                      String(partitionContext),
                       pathSpec.path,
                       fromDate,
                       s3ToDate
                     );
+                    rawS3FilePath = cloudFiles.source;
+                    if (cloudFiles.incomplete)
+                      historyWarnings.add(
+                        `Some cloud files for ${pathSpec.path} are uncommitted, corrupt, or unavailable.`
+                      );
                   }
                 } else if (!rawEarliestDate) {
-                  rawS3FilePath = this.hivePathBuilder.buildS3Glob(
-                    s3Config.bucket,
-                    s3Config.keyPrefix || '',
+                  localFilePath = null;
+                  const cloudFiles = await this.getCachedS3Files(
+                    s3Config,
                     'raw',
-                    partitionContext,
+                    String(partitionContext),
                     pathSpec.path,
                     fromDate,
                     toDate
                   );
+                  rawS3FilePath = cloudFiles.source;
+                  if (cloudFiles.incomplete)
+                    historyWarnings.add(
+                      `Some cloud files for ${pathSpec.path} are uncommitted, corrupt, or unavailable.`
+                    );
+                  if (!rawS3FilePath)
+                    historyWarnings.add(
+                      `No committed local or cloud history files were found for ${pathSpec.path} in the requested range.`
+                    );
                 }
               }
               // Rebuild fromClause with raw tier local + S3
-              const rawLocalFrom = buildFromClause(localFilePath);
+              const rawLocalFrom = localFilePath
+                ? buildFromClause(localFilePath)
+                : null;
               localFromClause = rawLocalFrom; // Update fallback for S3 failure
-              if (rawS3FilePath) {
+              if (rawS3FilePath && rawLocalFrom) {
                 fromClause = `(
                   SELECT * FROM ${rawLocalFrom}
                   UNION ALL
@@ -1758,8 +1865,13 @@ export class HistoryAPI {
                 debug(
                   `Hybrid query (raw tier): combining local and S3 sources`
                 );
-              } else {
+              } else if (rawS3FilePath) {
+                fromClause = buildFromClause(rawS3FilePath);
+              } else if (rawLocalFrom) {
                 fromClause = rawLocalFrom;
+              } else {
+                allData[pathSpecKey(pathSpec)] = [];
+                return;
               }
             }
             debug(
@@ -2046,6 +2158,10 @@ export class HistoryAPI {
           connection.disconnectSync();
         }
       } catch (error) {
+        if (s3Config?.enabled)
+          historyWarnings.add(
+            `Cloud history lookup failed for ${pathSpec.path}; returned whatever local data was available.`
+          );
         debug(`Error querying path ${pathSpec.path}: ${error}`);
 
         // Fallback: if parquet failed but buffer is available, query buffer only
@@ -2266,6 +2382,18 @@ export class HistoryAPI {
       },
       values: finalValues,
       data: finalData,
+      ...(historyWarnings.size
+        ? {
+            meta: {
+              autoConfigured: false,
+              paths: [],
+              message:
+                'History is incomplete because cloud data could not be read.',
+              incompleteHistory: true,
+              warnings: Array.from(historyWarnings),
+            },
+          }
+        : {}),
     } as DataResult;
   }
 

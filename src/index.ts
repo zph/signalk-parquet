@@ -947,6 +947,21 @@ export default function (app: ServerAPI): SignalKPlugin {
               region: isR2
                 ? 'auto'
                 : state.currentConfig.cloudUpload.region || 'us-east-1',
+              client: state.cloudClient,
+              cacheDirectory: path.join(
+                state.currentConfig.outputDirectory,
+                '.s3-read-cache'
+              ),
+              cacheMaxMB: state.currentConfig.cloudUpload.readCacheMaxMB ?? 512,
+              cacheNamespace: [
+                state.currentConfig.cloudUpload.provider,
+                isR2
+                  ? 'auto'
+                  : state.currentConfig.cloudUpload.region || 'us-east-1',
+                state.currentConfig.cloudUpload.endpoint || '',
+                state.currentConfig.cloudUpload.bucket || '',
+                state.currentConfig.cloudUpload.keyPrefix || '',
+              ].join('|'),
             }
           : undefined;
 
@@ -1430,6 +1445,15 @@ export default function (app: ServerAPI): SignalKPlugin {
             description:
               'Delete local files after successful upload to cloud storage',
             default: false,
+          },
+          readCacheMaxMB: {
+            type: 'integer',
+            title: 'Local cloud-read cache (MB)',
+            description:
+              'Maximum disk space used for cached S3 history reads. Least-recently-used Parquet files are evicted first. Set to 0 to disable cloud history reads.',
+            minimum: 0,
+            maximum: 1048576,
+            default: 512,
           },
         },
         dependencies: {

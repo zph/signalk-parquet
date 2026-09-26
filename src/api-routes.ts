@@ -42,6 +42,7 @@ import {
 } from './types';
 import { MigrationService } from './services/migration-service';
 import { GPX_UPLOAD_MAX_FILE_BYTES, GPX_UPLOAD_MAX_FILES } from './constants';
+import { uploadVerifiedCloudObject } from './data-handler';
 import {
   GpxImportService,
   DEFAULT_IMPORT_PATHS,
@@ -714,7 +715,11 @@ export function registerApiRoutes(
           error: 'Cloud upload is not enabled',
         });
       }
-
+      if (!cloud.bucket) {
+        return res
+          .status(400)
+          .json({ success: false, error: 'Cloud bucket is not configured' });
+      }
       if (!state.cloudClient || !ListObjectsV2Command) {
         try {
           const awsS3 = await import('@aws-sdk/client-s3');
@@ -902,6 +907,13 @@ export function registerApiRoutes(
           error: 'Cloud upload is not enabled',
         });
       }
+      if (!cloud.bucket) {
+        return res.status(400).json({
+          success: false,
+          error: 'Cloud bucket is not configured',
+        });
+      }
+      const cloudBucket = cloud.bucket;
 
       if (!state.cloudClient) {
         return res.status(503).json({
@@ -910,10 +922,8 @@ export function registerApiRoutes(
         });
       }
 
-      let PutObjectCommand: any;
       try {
         const awsS3 = await import('@aws-sdk/client-s3');
-        PutObjectCommand = awsS3.PutObjectCommand;
         if (!ListObjectsV2Command) {
           ListObjectsV2Command = awsS3.ListObjectsV2Command;
         }
@@ -972,32 +982,7 @@ export function registerApiRoutes(
               ignore: EXCLUDED_LOCAL_DIRS,
             });
 
-            job.phase = `Listing ${label} objects...`;
-            job.progress = 10;
-            const cloudKeys = new Set<string>();
-            let continuationToken: string | undefined;
-
-            do {
-              const listCommand = new ListObjectsV2Command({
-                Bucket: cloud.bucket,
-                Prefix: cloud.keyPrefix || undefined,
-                ContinuationToken: continuationToken,
-              });
-
-              const response = await state.cloudClient.send(listCommand);
-
-              if (response.Contents) {
-                for (const obj of response.Contents) {
-                  if (obj.Key) cloudKeys.add(obj.Key);
-                }
-              }
-
-              continuationToken = response.IsTruncated
-                ? response.NextContinuationToken
-                : undefined;
-            } while (continuationToken);
-
-            job.phase = 'Comparing files...';
+            job.phase = 'Reconciling individual objects...';
             job.progress = 20;
 
             for (const localPath of localFiles) {
@@ -1014,9 +999,9 @@ export function registerApiRoutes(
                 cloudKey = `${prefix}${relativePath}`;
               }
 
-              if (!cloudKeys.has(cloudKey)) {
-                filesToSync.push({ key: cloudKey, localPath });
-              }
+              // Reconcile every individual object; directory membership or
+              // object-key presence alone does not prove a complete commit.
+              filesToSync.push({ key: cloudKey, localPath });
             }
           }
 
@@ -1039,15 +1024,13 @@ export function registerApiRoutes(
             job.progress = 25 + Math.round(((i + 1) / filesToSync.length) * 75);
 
             try {
-              const fileContent = await fs.readFile(localPath);
-              const command = new PutObjectCommand({
-                Bucket: cloud.bucket,
-                Key: key,
-                Body: fileContent,
-                ContentType: 'application/octet-stream',
-              });
-
-              await state.cloudClient.send(command);
+              await uploadVerifiedCloudObject(
+                localPath,
+                key,
+                state.cloudClient,
+                cloudBucket,
+                false
+              );
               job.filesUploaded++;
               app.debug(`Synced to ${label}: ${key}`);
             } catch (err) {

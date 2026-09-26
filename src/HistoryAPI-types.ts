@@ -43,6 +43,8 @@ export interface DataResult {
     autoConfigured: boolean;
     paths: string[];
     message: string;
+    incompleteHistory?: boolean;
+    warnings?: string[];
   };
 }
 // eslint-disable-next-line @typescript-eslint/no-unused-vars

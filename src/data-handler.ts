@@ -1,5 +1,6 @@
 import * as fs from 'fs-extra';
 import * as path from 'path';
+import { createHash } from 'crypto';
 import { glob as globOriginal } from 'glob';
 import { promisify } from 'util';
 import { minimatch } from 'minimatch';
@@ -30,6 +31,7 @@ import {
 } from './types';
 import { extractCommandName } from './commands';
 import { resolveCustomS3Endpoint } from './utils/cloud-endpoint';
+import { DuckDBPool } from './utils/duckdb-pool';
 import {
   Context,
   Delta,
@@ -46,7 +48,9 @@ let S3Client: any,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   PutObjectCommand: any,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  ListObjectsV2Command: any;
+  HeadObjectCommand: any,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  GetObjectCommand: any;
 
 // Bound network waits for cloud (S3/R2) calls so a stalled endpoint can't block
 // the upload/daily-export pipeline indefinitely (a real risk on a vessel uplink).
@@ -84,7 +88,8 @@ export async function initializeCloudSDK(
         const awsS3 = await import('@aws-sdk/client-s3');
         S3Client = awsS3.S3Client;
         PutObjectCommand = awsS3.PutObjectCommand;
-        ListObjectsV2Command = awsS3.ListObjectsV2Command;
+        HeadObjectCommand = awsS3.HeadObjectCommand;
+        GetObjectCommand = awsS3.GetObjectCommand;
       }
     } catch (importError) {
       // Cloud upload is configured but the AWS SDK failed to load; leave the
@@ -1089,79 +1094,214 @@ export function initializeRegimenStates(
 // These functions have been replaced by the daily export system in parquet-export-service.ts
 // The new exportDayToParquet() creates consolidated daily files directly
 
-// List all existing keys in cloud bucket (paginated)
-async function listCloudKeys(
-  client: any,
-  bucket: string,
-  prefix?: string
-): Promise<Set<string>> {
-  const keys = new Set<string>();
-  if (!ListObjectsV2Command) return keys;
-
-  let continuationToken: string | undefined;
-  do {
-    const response = await client.send(
-      new ListObjectsV2Command({
-        Bucket: bucket,
-        Prefix: prefix || undefined,
-        ContinuationToken: continuationToken,
-      })
-    );
-    if (response.Contents) {
-      for (const obj of response.Contents) {
-        if (obj.Key) keys.add(obj.Key);
-      }
-    }
-    continuationToken = response.IsTruncated
-      ? response.NextContinuationToken
-      : undefined;
-  } while (continuationToken);
-
-  return keys;
+interface CloudObjectManifest {
+  version: 1;
+  key: string;
+  sha256: string;
+  bytes: number;
+  rows: number;
+  committedAt: string;
 }
 
-/**
- * Uploads one file to the cloud target. There is no HEAD check: the caller
- * decides which files are missing.
- */
+async function describeParquet(
+  filePath: string
+): Promise<Omit<CloudObjectManifest, 'version' | 'key' | 'committedAt'>> {
+  const bytes = await fs.readFile(filePath);
+  const connection = await DuckDBPool.getConnection();
+  try {
+    const escaped = filePath.replace(/'/g, "''");
+    const result = await connection.runAndReadAll(
+      `SELECT count(*) AS row_count FROM read_parquet('${escaped}', hive_partitioning=false)`
+    );
+    const row = result.getRowObjects()[0] as
+      { row_count?: number | bigint } | undefined;
+    if (!row || row.row_count === undefined)
+      throw new Error('Could not verify Parquet row count');
+    return {
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      bytes: bytes.length,
+      rows: Number(row.row_count),
+    };
+  } finally {
+    connection.disconnectSync();
+  }
+}
+
+async function bodyToBuffer(body: any): Promise<Buffer> {
+  if (Buffer.isBuffer(body) || body instanceof Uint8Array)
+    return Buffer.from(body);
+  if (body?.transformToByteArray)
+    return Buffer.from(await body.transformToByteArray());
+  const chunks: Buffer[] = [];
+  for await (const chunk of body as AsyncIterable<Uint8Array | Buffer>)
+    chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks);
+}
+
+async function readCloudManifest(
+  client: any,
+  target: CloudTarget,
+  key: string
+): Promise<CloudObjectManifest | undefined> {
+  if (!GetObjectCommand) return undefined;
+  try {
+    const response = await client.send(
+      new GetObjectCommand({
+        Bucket: target.bucket,
+        Key: `${key}.manifest.json`,
+      })
+    );
+    const json = JSON.parse(
+      (await bodyToBuffer(response.Body)).toString('utf8')
+    ) as CloudObjectManifest;
+    return json?.version === 1 && json.key === key ? json : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function remoteObjectMatches(
+  client: any,
+  target: CloudTarget,
+  key: string,
+  descriptor: Omit<CloudObjectManifest, 'version' | 'key' | 'committedAt'>,
+  verifyPayload = false
+): Promise<boolean> {
+  if (!HeadObjectCommand || !GetObjectCommand) return false;
+  try {
+    const head = await client.send(
+      new HeadObjectCommand({ Bucket: target.bucket, Key: key })
+    );
+    if (
+      Number(head.ContentLength) !== descriptor.bytes ||
+      head.Metadata?.sha256 !== descriptor.sha256 ||
+      Number(head.Metadata?.rows) !== descriptor.rows
+    )
+      return false;
+    if (!verifyPayload) return true;
+    const object = await client.send(
+      new GetObjectCommand({ Bucket: target.bucket, Key: key })
+    );
+    const actual = createHash('sha256')
+      .update(await bodyToBuffer(object.Body))
+      .digest('hex');
+    return actual === descriptor.sha256;
+  } catch {
+    return false;
+  }
+}
+
+/** Upload one Parquet object transactionally. The local file is eligible for
+ * deletion only after the object is read back and verified and its manifest
+ * has been committed and verified remotely. */
+export async function uploadVerifiedCloudObject(
+  filePath: string,
+  cloudKey: string,
+  client: any,
+  bucket: string,
+  deleteAfterUpload = false
+): Promise<void> {
+  if (!client || !PutObjectCommand || !HeadObjectCommand || !GetObjectCommand)
+    throw new Error('Cloud verification SDK is unavailable');
+  try {
+    const descriptor = await describeParquet(filePath);
+    const target = { client, bucket } as CloudTarget;
+    const existingManifest = await readCloudManifest(client, target, cloudKey);
+    if (
+      existingManifest &&
+      existingManifest.sha256 === descriptor.sha256 &&
+      existingManifest.bytes === descriptor.bytes &&
+      existingManifest.rows === descriptor.rows &&
+      (await remoteObjectMatches(client, target, cloudKey, descriptor))
+    ) {
+      if (deleteAfterUpload) await fs.unlink(filePath);
+      return;
+    }
+    const fileContent = await fs.readFile(filePath);
+    await client.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: cloudKey,
+        Body: fileContent,
+        ContentType: 'application/octet-stream',
+        Metadata: { sha256: descriptor.sha256, rows: String(descriptor.rows) },
+      })
+    );
+
+    if (
+      !(await remoteObjectMatches(client, target, cloudKey, descriptor, true))
+    ) {
+      throw new Error(
+        'Uploaded object failed size, checksum, or row-count verification'
+      );
+    }
+
+    const manifest: CloudObjectManifest = {
+      version: 1,
+      key: cloudKey,
+      ...descriptor,
+      committedAt: new Date().toISOString(),
+    };
+    const manifestBody = Buffer.from(JSON.stringify(manifest));
+    await client.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: `${cloudKey}.manifest.json`,
+        Body: manifestBody,
+        ContentType: 'application/json',
+        Metadata: {
+          sha256: createHash('sha256').update(manifestBody).digest('hex'),
+        },
+      })
+    );
+    const manifestHead = await client.send(
+      new HeadObjectCommand({
+        Bucket: bucket,
+        Key: `${cloudKey}.manifest.json`,
+      })
+    );
+    if (Number(manifestHead.ContentLength) !== manifestBody.length) {
+      throw new Error('Committed manifest failed size verification');
+    }
+    const committedManifest = await client.send(
+      new GetObjectCommand({ Bucket: bucket, Key: `${cloudKey}.manifest.json` })
+    );
+    const committedBytes = await bodyToBuffer(committedManifest.Body);
+    if (
+      createHash('sha256').update(committedBytes).digest('hex') !==
+      createHash('sha256').update(manifestBody).digest('hex')
+    ) {
+      throw new Error('Committed manifest failed checksum verification');
+    }
+
+    if (deleteAfterUpload) {
+      await fs.unlink(filePath);
+    }
+  } catch (err) {
+    throw new Error(
+      `Cloud transaction failed for ${cloudKey}: ${(err as Error).message}`,
+      { cause: err }
+    );
+  }
+}
+
 async function putToCloud(
   filePath: string,
   target: CloudTarget,
   config: PluginConfig
 ): Promise<boolean> {
-  if (!target.client || !PutObjectCommand) return false;
-
-  // Object keys use forward slashes whatever the local OS.
-  const relativePath = path
-    .relative(config.outputDirectory, filePath)
-    .split(path.sep)
-    .join('/');
-  let cloudKey = relativePath;
-  if (target.keyPrefix) {
-    const prefix = target.keyPrefix.endsWith('/')
-      ? target.keyPrefix
-      : `${target.keyPrefix}/`;
-    cloudKey = `${prefix}${relativePath}`;
-  }
-
   try {
-    const fileContent = await fs.readFile(filePath);
-    await target.client.send(
-      new PutObjectCommand({
-        Bucket: target.bucket,
-        Key: cloudKey,
-        Body: fileContent,
-        ContentType: 'application/octet-stream',
-      })
+    await uploadVerifiedCloudObject(
+      filePath,
+      getCloudKey(filePath, target, config),
+      target.client,
+      target.bucket,
+      target.deleteAfterUpload
     );
-
-    if (target.deleteAfterUpload) {
-      await fs.unlink(filePath);
-    }
     return true;
   } catch (err) {
     _appInstance?.error(
-      `[CloudSync] Upload failed for ${cloudKey}: ${(err as Error).message}`
+      `[CloudSync] Upload failed for ${filePath}: ${(err as Error).message}`
     );
     return false;
   }
@@ -1191,12 +1331,12 @@ function getCloudKey(
 }
 
 /**
- * Uploads the hive files that are not in the bucket yet, `concurrency` at a
- * time, skipping side directories such as processed/ and quarantine/.
+ * Reconcile every local Hive file against its own committed object manifest.
+ * Directory/object presence is not evidence that this individual file synced.
  */
 async function uploadMissingFiles(
   localFiles: string[],
-  existingKeys: Set<string>,
+  _existingKeys: Set<string>,
   target: CloudTarget,
   config: PluginConfig,
   app: ServerAPI,
@@ -1213,10 +1353,7 @@ async function uploadMissingFiles(
     const posixPath = f.split(path.sep).join('/');
     return !excludedDirs.some(dir => posixPath.includes(dir));
   });
-  const missing = filtered.filter(
-    f => !existingKeys.has(getCloudKey(f, target, config))
-  );
-
+  const missing = filtered;
   if (missing.length === 0) return 0;
 
   app.debug(
@@ -1224,21 +1361,28 @@ async function uploadMissingFiles(
   );
 
   let uploaded = 0;
+  const failures: string[] = [];
   for (let i = 0; i < missing.length; i += concurrency) {
     const batch = missing.slice(i, i + concurrency);
     const results = await Promise.all(
       batch.map(f => putToCloud(f, target, config))
     );
     uploaded += results.filter(Boolean).length;
+    batch.forEach((file, index) => {
+      if (!results[index]) failures.push(file);
+    });
     // Yield to event loop between batches
     await new Promise(resolve => setTimeout(resolve, 10));
   }
+  if (failures.length)
+    throw new Error(
+      `${failures.length} object(s) failed transactional cloud reconciliation; first: ${failures[0]}`
+    );
   return uploaded;
 }
 
 /**
- * Startup sync: uploads the hive-partitioned parquet files of the last seven
- * days whose day directory has no objects in the bucket yet.
+ * Startup sync reconciles each recent local object independently.
  */
 export async function uploadAllConsolidatedFilesToS3(
   config: PluginConfig,
@@ -1249,118 +1393,31 @@ export async function uploadAllConsolidatedFilesToS3(
   if (!target) return;
 
   try {
-    const daysToCheck = 7;
-    const today = new Date();
-
-    // Gather local files for the lookback window first (fast, local I/O)
-    const allLocalFiles: string[] = [];
-    for (let daysAgo = 1; daysAgo <= daysToCheck; daysAgo++) {
-      const targetDate = new Date(today);
-      targetDate.setUTCDate(today.getUTCDate() - daysAgo);
-      const year = targetDate.getUTCFullYear();
-      const dayOfYear = String(
-        Math.floor((targetDate.getTime() - Date.UTC(year, 0, 1)) / 86400000) + 1
-      ).padStart(3, '0');
-
-      const files = await glob(
-        `tier=*/**/year=${year}/day=${dayOfYear}/*.parquet`,
-        {
-          cwd: config.outputDirectory,
-          absolute: true,
-          nodir: true,
-        }
-      );
-      allLocalFiles.push(...files);
-    }
+    const allLocalFiles = await glob('tier=*/**/*.parquet', {
+      cwd: config.outputDirectory,
+      absolute: true,
+      nodir: true,
+    });
 
     app.debug(
-      `[StartupSync] Found ${allLocalFiles.length} local files in last ${daysToCheck} days`
+      `[StartupSync] Reconciling ${allLocalFiles.length} local Parquet objects individually`
     );
     if (allLocalFiles.length === 0) return;
 
-    // List only raw-tier prefixes in R2 to find which context/path/year/day combos are synced
-    const prefixSet = new Set<string>();
-    const basePrefix = target.keyPrefix
-      ? target.keyPrefix.endsWith('/')
-        ? target.keyPrefix
-        : `${target.keyPrefix}/`
-      : '';
-    for (const file of allLocalFiles) {
-      // Forward slashes: the directory becomes an object key prefix.
-      const rel = path
-        .relative(config.outputDirectory, file)
-        .split(path.sep)
-        .join('/');
-      if (!rel.startsWith('tier=raw')) continue;
-      const dirPart = path.dirname(rel);
-      prefixSet.add(`${basePrefix}${dirPart}/`);
-    }
-
-    app.debug(
-      `[StartupSync] Listing ${target.label} objects for ${prefixSet.size} raw-tier prefixes...`
+    const uploaded = await uploadMissingFiles(
+      allLocalFiles,
+      new Set(),
+      target,
+      config,
+      app
     );
-
-    // Build set of synced directories (context/path/year/day) from raw tier
-    // e.g. "context=X/path=Y/year=2026/day=073"
-    const syncedDirs = new Set<string>();
-    for (const prefix of prefixSet) {
-      const keys = await listCloudKeys(target.client, target.bucket, prefix);
-      if (keys.size > 0) {
-        // Extract context/path/year/day from the prefix (strip basePrefix and tier=raw/)
-        const withoutBase = prefix.startsWith(basePrefix)
-          ? prefix.slice(basePrefix.length)
-          : prefix;
-        // withoutBase = "tier=raw/context=X/path=Y/year=YYYY/day=DDD/"
-        const withoutTier = withoutBase.replace(/^tier=[^/]+\//, '');
-        syncedDirs.add(withoutTier);
-      }
-    }
-    app.debug(
-      `[StartupSync] Found ${syncedDirs.size} synced directories in ${target.label}`
-    );
-
-    // Filter local files: skip any file whose context/path/year/day is already synced
-    const excludedDirs = [
-      '/processed/',
-      '/repaired/',
-      '/failed/',
-      '/quarantine/',
-    ];
-    const filesToUpload = allLocalFiles.filter(f => {
-      const rel = path
-        .relative(config.outputDirectory, f)
-        .split(path.sep)
-        .join('/');
-      if (excludedDirs.some(dir => rel.includes(dir))) return false;
-      // Strip tier segment to get context/path/year/day/
-      const withoutTier = rel.replace(/^tier=[^/]+\//, '');
-      const dirPart = path.dirname(withoutTier) + '/';
-      return !syncedDirs.has(dirPart);
-    });
-
-    if (filesToUpload.length === 0) {
-      app.debug(`[StartupSync] All files already synced`);
-      return;
-    }
-
-    app.debug(
-      `[CloudSync] ${filesToUpload.length} files to upload (3 concurrent)`
-    );
-    let uploaded = 0;
-    for (let i = 0; i < filesToUpload.length; i += 3) {
-      const batch = filesToUpload.slice(i, i + 3);
-      const results = await Promise.all(
-        batch.map(f => putToCloud(f, target, config))
-      );
-      uploaded += results.filter(Boolean).length;
-      await new Promise(resolve => setTimeout(resolve, 10));
-    }
 
     if (uploaded > 0) {
       app.debug(`[StartupSync] Uploaded ${uploaded} files to ${target.label}`);
     }
   } catch (error) {
     app.error(`[StartupSync] Failed: ${(error as Error).message}`);
+    throw error;
   }
 }
 
@@ -1392,16 +1449,9 @@ export async function uploadConsolidatedFilesToS3(
 
     if (localFiles.length === 0) return;
 
-    // List existing keys and only upload missing
-    const existingKeys = await listCloudKeys(
-      target.client,
-      target.bucket,
-      target.keyPrefix || undefined
-    );
-
     const uploaded = await uploadMissingFiles(
       localFiles,
-      existingKeys,
+      new Set(),
       target,
       config,
       app
@@ -1416,5 +1466,6 @@ export async function uploadConsolidatedFilesToS3(
     app.error(
       `Cloud upload failed for date ${date.toISOString().slice(0, 10)}: ${(error as Error).message}`
     );
+    throw error;
   }
 }
