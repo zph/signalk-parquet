@@ -455,7 +455,7 @@ export class AggregationService {
           FROM read_parquet([${fileListStr}], union_by_name=true)
           GROUP BY bucket_time, context, path
           ORDER BY bucket_time
-        ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3);
+        ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9);
       `;
     }
 
@@ -477,7 +477,7 @@ export class AggregationService {
         ) src
         GROUP BY time_bucket(INTERVAL '${intervalSeconds} seconds', src_bucket_time::TIMESTAMP), context, path
         ORDER BY 1
-      ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3);
+      ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9);
     `;
   }
 
@@ -516,7 +516,7 @@ export class AggregationService {
           WHERE value IS NOT NULL AND TRY_CAST(value AS DOUBLE) IS NOT NULL
           GROUP BY bucket_time, context, path
           ORDER BY bucket_time
-        ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3);
+        ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9);
       `;
     }
 
@@ -573,7 +573,7 @@ export class AggregationService {
         ) src
         GROUP BY time_bucket(INTERVAL '${intervalSeconds} seconds', src_bucket_time::TIMESTAMP), context, path
         ORDER BY 1
-      ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3);
+      ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9);
     `;
   }
 
@@ -713,7 +713,7 @@ export class AggregationService {
          AND r.path = s.path
         WHERE r.rn = 1
         ORDER BY r.bucket_time
-      ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3);
+      ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9);
     `;
   }
 

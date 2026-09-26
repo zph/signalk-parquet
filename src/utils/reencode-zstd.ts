@@ -93,7 +93,7 @@ export async function reencodeParquetDirectory(
         await connection.runAndReadAll(
           `COPY (SELECT * FROM read_parquet(${sqlPath(file)}, hive_partitioning=false))
            TO ${sqlPath(temp)}
-           (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3)`
+           (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9)`
         );
         const output = await metadata(connection, temp);
         if (

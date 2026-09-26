@@ -51,7 +51,7 @@ async function main(): Promise<void> {
       await conn.runAndReadAll(
         `COPY (SELECT * FROM read_parquet(${sourceList(group)}, union_by_name=true, hive_partitioning=false)
           ORDER BY signalk_timestamp, received_timestamp, context)
-         TO ${quote(output)} (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3)`
+         TO ${quote(output)} (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9)`
       );
       sharedBytes += (await fs.stat(output)).size;
       if (key.startsWith('path=navigation__position' + path.sep)) {

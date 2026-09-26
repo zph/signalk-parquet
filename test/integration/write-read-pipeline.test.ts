@@ -176,6 +176,21 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
           metadata.getRowObjects().map(row => row.compression)
         ).to.deep.equal(['ZSTD']);
       }
+      // Simulate an existing Snappy archive beside a new ZSTD-9 hour. The
+      // daily compactor must read both without any migration step.
+      const legacyFile = first.filesCreated[0];
+      const legacyTemp = `${legacyFile}.snappy.parquet`;
+      await hourlyConn.runAndReadAll(
+        `COPY (SELECT * FROM read_parquet('${toGlob(legacyFile)}', hive_partitioning=false))
+         TO '${toGlob(legacyTemp)}' (FORMAT PARQUET, COMPRESSION SNAPPY)`
+      );
+      await fs.move(legacyTemp, legacyFile, { overwrite: true });
+      const legacyMetadata = await hourlyConn.runAndReadAll(
+        `SELECT DISTINCT compression FROM parquet_metadata('${toGlob(legacyFile)}')`
+      );
+      expect(
+        legacyMetadata.getRowObjects().map(row => row.compression)
+      ).to.deep.equal(['SNAPPY']);
     } finally {
       hourlyConn.disconnectSync();
     }

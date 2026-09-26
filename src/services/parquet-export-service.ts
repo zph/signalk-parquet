@@ -422,7 +422,7 @@ export class ParquetExportService {
         const sql = `COPY (
         SELECT * FROM read_parquet([${sourceSql}], union_by_name=true, hive_partitioning=false)
         ORDER BY signalk_timestamp, received_timestamp, context, path
-      ) TO ${quote(temp)} (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3);`;
+      ) TO ${quote(temp)} (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9, ROW_GROUP_SIZE 16384);`;
         try {
           const connection = await DuckDBPool.getConnection();
           try {

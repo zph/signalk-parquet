@@ -215,16 +215,17 @@ Configure basic plugin settings (path configuration is managed separately in the
 | **Output Directory** | Directory to save data files | SignalK data directory |
 | **Filename Prefix** | Prefix for generated filenames | `signalk_data` |
 | **File Format** | Output format (parquet, json, csv) | `parquet` |
-| **Parquet Compression** | All new raw and aggregated Parquet files use ZSTD level 3; legacy files remain readable | `ZSTD` |
+| **Parquet Compression** | All new raw and aggregated Parquet files use ZSTD level 9; legacy files remain readable | `ZSTD` |
 | **Retention Days** | Days to keep raw files (`0` means forever) | 0 |
 | **Daily Export Hour** | Hour (0-23 UTC) for daily compaction, aggregation, and upload; completed hours export automatically | 4 |
 | **Export Batch Size** | Max records to export per cycle (1,000-200,000) | 50000 |
 | **Enable Raw SQL** | Enable /api/query endpoint for raw SQL queries | `false` |
 
-New hourly raw, aggregated, and compacted Parquet files use ZSTD level 3.
+New hourly raw, aggregated, and compacted Parquet files use ZSTD level 9.
 The plugin requires a Node.js runtime with native ZSTD support. Existing
 Snappy or uncompressed files remain readable, but are not rewritten merely
-by upgrading. To re-encode an existing archive without changing its rows:
+by upgrading. No migration is needed for the compression change. To
+optionally re-encode old Snappy or uncompressed files without changing rows:
 
 ```sh
 npm run build
@@ -245,7 +246,7 @@ npm run migrate:ais-shared -- /path/to/signalk-parquet
 npm run migrate:ais-shared -- /path/to/signalk-parquet --apply
 ```
 
-The apply step stages ZSTD-3 files, verifies row counts and exact row content,
+The apply step stages ZSTD-9 files, verifies row counts and exact row content,
 publishes the shared partition, then permanently deletes old per-vessel
 directories. Readers use only the shared layout after upgrading; there is no
 old-layout fallback. Run

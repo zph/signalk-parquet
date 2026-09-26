@@ -1273,9 +1273,9 @@ export default function (app: ServerAPI): SignalKPlugin {
         type: 'string',
         title: 'Parquet Compression',
         description:
-          'All newly written Parquet files use ZSTD level 3. Legacy Snappy and uncompressed files remain readable.',
+          'All newly written Parquet files use ZSTD level 9. Legacy Snappy and uncompressed files remain readable.',
         enum: Object.values(ParquetCompression),
-        enumNames: ['ZSTD level 3 (required)'],
+        enumNames: ['ZSTD level 9 (required)'],
         default: ParquetCompression.ZSTD,
       },
       retentionDays: {

@@ -28,7 +28,7 @@ if (
 codecs.ZSTD = {
   deflate: value =>
     zstdCompressSync(value, {
-      params: { [constants.ZSTD_c_compressionLevel]: 3 },
+      params: { [constants.ZSTD_c_compressionLevel]: 9 },
     }),
   inflate: value => zstdDecompressSync(value),
 };

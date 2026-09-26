@@ -724,13 +724,13 @@ export class CompactionService {
     // union_by_name=true: a column added partway through the year (e.g.
     // a new value_<key> exploded from value_json) merges cleanly. The
     // result has the union of columns; older rows have NULL where the
-    // newer column is absent. All output uses ZSTD level 3.
+    // newer column is absent. All output uses ZSTD level 9.
     const query = `
       COPY (
         SELECT * FROM read_parquet([${fileListSql}], union_by_name=true)
         ORDER BY signalk_timestamp
       ) TO '${tempFileSql}'
-        (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3);
+        (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9, ROW_GROUP_SIZE 16384);
     `;
 
     const connection = await DuckDBPool.getConnection();
