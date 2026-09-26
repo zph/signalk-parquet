@@ -3541,7 +3541,7 @@ export function registerApiRoutes(
       };
 
       // Scan all tiers
-      const tierNames = ['raw', '5s', '60s', '1h'];
+      const tierNames = ['raw', '5s', '10s', '60s', '1h'];
       const sqliteBytes = state.sqliteBuffer
         ? getSQLiteBytes(state.sqliteBuffer.getDbPath())
         : 0;
@@ -3809,7 +3809,7 @@ export function registerApiRoutes(
       const target = targetDirectory || state.getDataDirPath();
 
       // Validate tier
-      const validTiers: AggregationTier[] = ['raw', '5s', '60s', '1h'];
+      const validTiers: AggregationTier[] = ['raw', '5s', '10s', '60s', '1h'];
       if (!validTiers.includes(targetTier)) {
         return res.status(400).json({
           success: false,
@@ -4374,7 +4374,13 @@ export function registerApiRoutes(
   // so an authenticated admin cannot accidentally compact the
   // in-progress year via a high cutoff like 9999 (which would race live
   // writes).
-  const COMPACTION_VALID_TIERS: AggregationTier[] = ['raw', '5s', '60s', '1h'];
+  const COMPACTION_VALID_TIERS: AggregationTier[] = [
+    'raw',
+    '5s',
+    '10s',
+    '60s',
+    '1h',
+  ];
   const COMPACTION_MIN_YEAR = 2000;
   const validateCompactionInput = (body: {
     tier?: AggregationTier;
@@ -4597,7 +4603,8 @@ export function registerApiRoutes(
           filenamePrefix: state.currentConfig?.filenamePrefix || 'signalk_data',
           // ?? not || so explicit 0 (= keep forever) survives the coalesce.
           retentionDays: buildPerTierRetention(
-            state.currentConfig?.retentionDays ?? 0
+            state.currentConfig?.retentionDays ?? 0,
+            state.currentConfig?.tierRetentionDays
           ),
           pathRetentionOverrides: state.currentConfig?.pathRetentionOverrides,
         },
@@ -4657,7 +4664,7 @@ export function registerApiRoutes(
       const { sourceTier, targetTier } = req.params;
       const { date } = req.body;
 
-      const validTiers: AggregationTier[] = ['raw', '5s', '60s', '1h'];
+      const validTiers: AggregationTier[] = ['raw', '5s', '10s', '60s', '1h'];
       if (
         !validTiers.includes(sourceTier as AggregationTier) ||
         !validTiers.includes(targetTier as AggregationTier)
@@ -4872,7 +4879,7 @@ export function registerApiRoutes(
       (async () => {
         try {
           const dataDir = state.getDataDirPath();
-          const aggregatedTiers: AggregationTier[] = ['5s', '60s', '1h'];
+          const aggregatedTiers: AggregationTier[] = ['5s', '10s', '60s', '1h'];
 
           // Scan for angular paths in aggregated tiers
           const angularPathsFound = new Set<string>();

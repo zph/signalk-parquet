@@ -56,7 +56,7 @@ export async function getParquetBytes(directory: string): Promise<number> {
     }
     for (const entry of entries) {
       if (
-        (root && !/^tier=(raw|5s|60s|1h)$/.test(entry.name)) ||
+        (root && !/^tier=(raw|5s|10s|60s|1h)$/.test(entry.name)) ||
         (entry.isDirectory() &&
           ['processed', 'failed', 'quarantine', 'repaired'].includes(
             entry.name

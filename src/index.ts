@@ -297,6 +297,22 @@ export default function (app: ServerAPI): SignalKPlugin {
             options.retentionDays >= 0
           ? options.retentionDays
           : 0,
+      tierRetentionDays: (() => {
+        const value = (options as any)?.tierRetentionDays;
+        if (!value || typeof value !== 'object') return undefined;
+        const fields = [value.exact, value.tenSecond, value.sixtySecond];
+        return fields.every(
+          v => typeof v === 'number' && Number.isFinite(v) && v >= 0
+        ) &&
+          value.exact > 0 &&
+          value.tenSecond > 0
+          ? {
+              exact: value.exact,
+              tenSecond: value.tenSecond,
+              sixtySecond: value.sixtySecond,
+            }
+          : undefined;
+      })(),
       pathRetentionOverrides: parsePathRetentionOverrides(
         options?.pathRetentionOverrides,
         app
@@ -629,7 +645,10 @@ export default function (app: ServerAPI): SignalKPlugin {
       aggregationConfig = {
         outputDirectory: state.currentConfig.outputDirectory,
         filenamePrefix: state.currentConfig.filenamePrefix,
-        retentionDays: buildPerTierRetention(state.currentConfig.retentionDays),
+        retentionDays: buildPerTierRetention(
+          state.currentConfig.retentionDays,
+          state.currentConfig.tierRetentionDays
+        ),
         pathRetentionOverrides: state.currentConfig.pathRetentionOverrides,
       };
       aggregationService = new AggregationService(aggregationConfig, app);
@@ -976,7 +995,8 @@ export default function (app: ServerAPI): SignalKPlugin {
           state.sqliteBuffer, // Pass SQLite buffer for federated queries
           state.autoDiscoveryService, // Pass auto-discovery service
           s3QueryConfig, // S3 config for federated queries
-          state.currentConfig.pathRetentionOverrides // skipAggregation read-path fallback
+          state.currentConfig.pathRetentionOverrides, // skipAggregation read-path fallback
+          state.currentConfig.tierRetentionDays
         );
       } else {
         // Reconfigure (stop→start without a full process restart): the V1 express
@@ -993,6 +1013,9 @@ export default function (app: ServerAPI): SignalKPlugin {
         state.historyApi.setDataDir(state.currentConfig.outputDirectory);
         state.historyApi.setPathRetentionOverrides(
           state.currentConfig.pathRetentionOverrides
+        );
+        state.historyApi.setTierRetentionDays(
+          state.currentConfig.tierRetentionDays
         );
       }
       app.debug(
@@ -1295,12 +1318,38 @@ export default function (app: ServerAPI): SignalKPlugin {
       },
       retentionDays: {
         type: 'integer',
-        title: 'Retention Period (days)',
+        title: 'Legacy Retention Fallback (days)',
         description:
-          'Days to keep raw-tier Parquet files. Aggregated tiers scale automatically (5s: 2x, 60s: 4x, 1h: 12x). 0 = keep forever (default). Cleanup runs once per day, right after the daily export.',
+          'Used only when Tiered Retention is left unset. If configured, tiered retention takes precedence. 0 = keep forever.',
         default: 0,
         minimum: 0,
         maximum: 36500,
+      },
+      tierRetentionDays: {
+        type: 'object',
+        title: 'Tiered Retention (optional)',
+        description:
+          'When configured, exact/raw data is kept for the exact period, then 10-second aggregates for the next period, then 60-second aggregates for the next period. The 10s and 60s expiry ages are cumulative. Leave unset to use the legacy retention setting. Each period must be greater than zero; 0 means keep the final tier indefinitely.',
+        properties: {
+          exact: {
+            type: 'integer',
+            title: 'Exact 1-second data (days)',
+            minimum: 1,
+            maximum: 36500,
+          },
+          tenSecond: {
+            type: 'integer',
+            title: 'Then 10-second data (days)',
+            minimum: 1,
+            maximum: 36500,
+          },
+          sixtySecond: {
+            type: 'integer',
+            title: 'Then 60-second data (days)',
+            minimum: 0,
+            maximum: 36500,
+          },
+        },
       },
       pathRetentionOverrides: {
         type: 'array',

@@ -31,6 +31,7 @@ export interface AggregationConfig {
   retentionDays: {
     raw: number;
     '5s': number;
+    '10s'?: number;
     '60s': number;
     '1h': number;
   };
@@ -49,6 +50,7 @@ export interface AggregationConfig {
 export const TIER_RETENTION_MULTIPLIER: Record<AggregationTier, number> = {
   raw: 1,
   '5s': 2,
+  '10s': 3,
   '60s': 4,
   '1h': 12,
 };
@@ -58,11 +60,27 @@ export const TIER_RETENTION_MULTIPLIER: Record<AggregationTier, number> = {
  * 0 in every tier (= keep forever).
  */
 export function buildPerTierRetention(
-  rawDays: number
+  rawDays: number,
+  tierDurations?: { exact: number; tenSecond: number; sixtySecond: number }
 ): AggregationConfig['retentionDays'] {
+  if (tierDurations) {
+    const exact = Math.max(0, tierDurations.exact);
+    const ten = Math.max(0, tierDurations.tenSecond);
+    const sixty = Math.max(0, tierDurations.sixtySecond);
+    // Cleanup thresholds are cumulative ages: raw expires after exact;
+    // 10s replaces raw until exact+10s, and 60s through all three periods.
+    return {
+      raw: exact,
+      '5s': exact + ten,
+      '10s': exact === 0 ? 0 : exact + ten,
+      '60s': sixty === 0 ? 0 : exact + ten + sixty,
+      '1h': sixty === 0 ? 0 : exact + ten + sixty,
+    };
+  }
   return {
     raw: rawDays * TIER_RETENTION_MULTIPLIER.raw,
     '5s': rawDays * TIER_RETENTION_MULTIPLIER['5s'],
+    '10s': rawDays * TIER_RETENTION_MULTIPLIER['10s'],
     '60s': rawDays * TIER_RETENTION_MULTIPLIER['60s'],
     '1h': rawDays * TIER_RETENTION_MULTIPLIER['1h'],
   };
@@ -121,11 +139,13 @@ function scheduleBulkJobCleanup(jobId: string) {
 const TIER_INTERVALS: Record<AggregationTier, number> = {
   raw: 1,
   '5s': 5,
+  '10s': 10,
   '60s': 60,
   '1h': 3600,
 };
 
-const TIER_HIERARCHY: AggregationTier[] = ['raw', '5s', '60s', '1h'];
+const TIER_HIERARCHY: AggregationTier[] = ['raw', '10s', '60s'];
+const TIER_CLEANUP_ORDER: AggregationTier[] = ['raw', '5s', '10s', '60s', '1h'];
 
 export class AggregationService {
   private readonly config: AggregationConfig;
@@ -163,7 +183,7 @@ export class AggregationService {
   ): Promise<AggregationResult[]> {
     const results: AggregationResult[] = [];
 
-    // Aggregate through the hierarchy: raw -> 5s -> 60s -> 1h
+    // Aggregate through the hierarchy: raw -> 10s -> 60s.
     for (let i = 0; i < TIER_HIERARCHY.length - 1; i++) {
       const sourceTier = TIER_HIERARCHY[i];
       const targetTier = TIER_HIERARCHY[i + 1];
@@ -777,10 +797,10 @@ export class AggregationService {
     const hasPathRules = !this.retentionRules.isEmpty();
     let processedSinceYield = 0;
 
-    for (const tier of TIER_HIERARCHY) {
+    for (const tier of TIER_CLEANUP_ORDER) {
       if (this.cancelRequested) break;
 
-      const tierDefaultDays = this.config.retentionDays[tier];
+      const tierDefaultDays = this.config.retentionDays[tier] ?? 0;
       // No tier default and no per-path overrides → nothing to do for
       // this tier. With overrides present we still walk the tier so
       // path-specific rules can act even when the global is infinite.

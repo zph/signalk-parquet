@@ -54,6 +54,12 @@ export interface PluginConfig {
   // historical default behaviour, since the cleanup job was previously
   // never scheduled.
   retentionDays: number;
+  /** Duration kept in each successive tier; zero means keep indefinitely. */
+  tierRetentionDays?: {
+    exact: number;
+    tenSecond: number;
+    sixtySecond: number;
+  };
   // Optional per-path overrides. Match by glob (`*` matches any chars
   // including dots); most-specific pattern wins, ties broken by
   // declaration order. See utils/retention-rules.ts.

@@ -129,6 +129,41 @@ describe('file discovery under a data directory named with glob syntax', functio
       ).to.equal(true);
     });
 
+    it('builds the configured raw to 10s to 60s hierarchy', async () => {
+      await exportRawDays([DAY_ONE]);
+      const results = await newAggregationService().aggregateDate(DAY_ONE);
+      expect(results.map(result => result.targetTier)).to.deep.equal([
+        '10s',
+        '60s',
+      ]);
+      expect(results.map(result => result.errors)).to.deep.equal([[], []]);
+      expect(results.map(result => result.filesCreated)).to.deep.equal([1, 1]);
+      for (const tier of ['10s', '60s'] as const) {
+        const dir = builder.buildPath(
+          dataDir,
+          tier,
+          STORED_CONTEXT,
+          SOG,
+          DAY_ONE
+        );
+        const files = (await fs.readdir(dir)).filter(name =>
+          name.endsWith('.parquet')
+        );
+        expect(files).to.have.length(1);
+        const connection = await DuckDBPool.getConnection();
+        try {
+          const row = (
+            await connection.runAndReadAll(
+              `SELECT COUNT(*) AS n FROM read_parquet('${path.join(dir, files[0])}')`
+            )
+          ).getRowObjects()[0] as { n: bigint };
+          expect(Number(row.n)).to.equal(1);
+        } finally {
+          connection.disconnectSync();
+        }
+      }
+    });
+
     it('deletes raw files past their retention', async () => {
       await exportRawDays([DAY_ONE]);
       const result = await newAggregationService(1).cleanupOldData();

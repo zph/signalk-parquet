@@ -5,7 +5,7 @@ import {
   FromToContextRequest,
   PathSpec,
 } from './HistoryAPI-types';
-import { ZonedDateTime, ZoneOffset, ZoneId } from '@js-joda/core';
+import { ZonedDateTime, ZoneOffset, ZoneId, Instant } from '@js-joda/core';
 import { Context, Path, Timestamp } from '@signalk/server-api';
 import { ParamsDictionary } from 'express-serve-static-core';
 import { ParsedQs } from 'qs';
@@ -92,7 +92,8 @@ export function registerHistoryApiRoute(
   sqliteBuffer?: SQLiteBufferInterface,
   autoDiscoveryService?: AutoDiscoveryService,
   s3Config?: S3QueryConfig,
-  pathRetentionOverrides?: PathRetentionRule[]
+  pathRetentionOverrides?: PathRetentionRule[],
+  tierRetentionDays?: { exact: number; tenSecond: number; sixtySecond: number }
 ): HistoryAPI {
   const historyApi = new HistoryAPI(
     selfId,
@@ -100,7 +101,8 @@ export function registerHistoryApiRoute(
     sqliteBuffer,
     autoDiscoveryService,
     s3Config,
-    pathRetentionOverrides
+    pathRetentionOverrides,
+    tierRetentionDays
   );
   // Handler for values endpoint
   const handleValues = (req: Request, res: Response) => {
@@ -776,6 +778,11 @@ export class HistoryAPI {
   private autoDiscoveryService?: AutoDiscoveryService;
   private s3Config?: S3QueryConfig;
   private s3ReadCache?: S3ReadCache;
+  private tierRetentionDays?: {
+    exact: number;
+    tenSecond: number;
+    sixtySecond: number;
+  };
   // Mirrors AggregationService's rule set so the read path can fall
   // back to tier=raw for skipAggregation paths. The aggregation
   // pipeline doesn't write 5s/60s/1h files for those, so a higher-
@@ -789,7 +796,12 @@ export class HistoryAPI {
     sqliteBuffer?: SQLiteBufferInterface,
     autoDiscoveryService?: AutoDiscoveryService,
     s3Config?: S3QueryConfig,
-    pathRetentionOverrides?: PathRetentionRule[]
+    pathRetentionOverrides?: PathRetentionRule[],
+    tierRetentionDays?: {
+      exact: number;
+      tenSecond: number;
+      sixtySecond: number;
+    }
   ) {
     this.sqliteBuffer = sqliteBuffer;
     this.hivePathBuilder = new HivePathBuilder();
@@ -803,6 +815,7 @@ export class HistoryAPI {
         )
       : undefined;
     this.retentionRules = new RetentionRuleSet(pathRetentionOverrides || []);
+    this.tierRetentionDays = tierRetentionDays;
   }
 
   /**
@@ -887,6 +900,12 @@ export class HistoryAPI {
     this.retentionRules = new RetentionRuleSet(overrides || []);
   }
 
+  setTierRetentionDays(
+    value: { exact: number; tenSecond: number; sixtySecond: number } | undefined
+  ): void {
+    this.tierRetentionDays = value;
+  }
+
   /**
    * Auto-select the optimal tier based on requested resolution
    * Returns undefined to use raw/flat data, or a tier name for aggregated data
@@ -910,9 +929,11 @@ export class HistoryAPI {
     let preferredTiers: AggregationTier[];
 
     if (resolutionMillis >= 3600000) {
-      preferredTiers = ['1h', '60s', '5s'];
+      preferredTiers = ['1h', '60s', '10s', '5s'];
     } else if (resolutionMillis >= 60000) {
-      preferredTiers = ['60s', '5s'];
+      preferredTiers = ['60s', '10s', '5s'];
+    } else if (resolutionMillis >= 10000) {
+      preferredTiers = ['10s', '5s'];
     } else if (resolutionMillis >= 5000) {
       preferredTiers = ['5s'];
     } else {
@@ -1176,20 +1197,126 @@ export class HistoryAPI {
 
       // Handle position and numeric paths together
       const positionPath = 'navigation.position';
-      const allResult = pathSpecs.length
-        ? await this.getNumericValues(
-            context,
-            from,
-            to,
-            timeResolutionMillis,
-            pathSpecs,
-            debug,
-            tier,
-            spatialFilter,
-            'local',
-            positionPath,
-            app
-          )
+      let allResult: DataResult = pathSpecs.length
+        ? await (async () => {
+            const retention = this.tierRetentionDays;
+            if (!retention) {
+              return this.getNumericValues(
+                context,
+                from,
+                to,
+                timeResolutionMillis,
+                pathSpecs,
+                debug,
+                tier,
+                spatialFilter,
+                'local',
+                positionPath,
+                app
+              );
+            }
+            const now = Date.now();
+            const exactCutoff = now - retention.exact * 86400000;
+            const tenSecondCutoff =
+              exactCutoff - retention.tenSecond * 86400000;
+            const sixtySecondCutoff =
+              retention.sixtySecond > 0
+                ? tenSecondCutoff - retention.sixtySecond * 86400000
+                : from.toInstant().toEpochMilli();
+            const requestedFrom = from.toInstant().toEpochMilli();
+            const requestedTo = to.toInstant().toEpochMilli();
+            const segments: Array<{
+              start: number;
+              end: number;
+              tier: AggregationTier | undefined;
+            }> = [
+              {
+                start: Math.max(requestedFrom, exactCutoff),
+                end: Math.min(requestedTo, now),
+                tier: 'raw',
+              },
+              {
+                start: Math.max(requestedFrom, tenSecondCutoff),
+                end: Math.min(requestedTo, exactCutoff),
+                tier: '10s',
+              },
+              {
+                start: Math.max(requestedFrom, sixtySecondCutoff),
+                end: Math.min(requestedTo, tenSecondCutoff),
+                tier: '60s',
+              },
+            ];
+            if (requestedTo > now)
+              segments.push({
+                start: Math.max(requestedFrom, now),
+                end: requestedTo,
+                tier,
+              });
+            const results: DataResult[] = [];
+            for (const segment of segments) {
+              if (segment.end <= segment.start) continue;
+              const segmentFrom = ZonedDateTime.ofInstant(
+                Instant.ofEpochMilli(segment.start),
+                ZoneOffset.UTC
+              );
+              const segmentTo = ZonedDateTime.ofInstant(
+                Instant.ofEpochMilli(segment.end),
+                ZoneOffset.UTC
+              );
+              results.push(
+                await this.getNumericValues(
+                  context,
+                  segmentFrom,
+                  segmentTo,
+                  timeResolutionMillis,
+                  pathSpecs,
+                  debug,
+                  segment.tier,
+                  spatialFilter,
+                  'local',
+                  positionPath,
+                  app
+                )
+              );
+            }
+            const base: DataResult = results[0] || {
+              context,
+              range: {
+                from: from.toString() as Timestamp,
+                to: to.toString() as Timestamp,
+              },
+              values: pathSpecs.map(spec => ({
+                path: spec.path,
+                method: spec.aggregateMethod,
+                ...filterEcho(spec.filters),
+              })),
+              data: [],
+            };
+            return {
+              ...base,
+              data: results
+                .flatMap(result => result.data)
+                .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+              meta: (() => {
+                const warnings = results.flatMap(
+                  result => result.meta?.warnings || []
+                );
+                const meta =
+                  results.find(result => result.meta)?.meta || base.meta;
+                return warnings.length
+                  ? {
+                      ...(meta || {
+                        autoConfigured: false,
+                        paths: [],
+                        message: 'History is incomplete.',
+                      }),
+                      incompleteHistory: true,
+                      warnings: Array.from(new Set(warnings)),
+                    }
+                  : meta;
+              })(),
+            };
+          })()
         : {
             context,
             range: {

@@ -8,7 +8,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-export type AggregationTier = 'raw' | '5s' | '60s' | '1h';
+export type AggregationTier = 'raw' | '5s' | '10s' | '60s' | '1h';
 
 export interface HivePath {
   basePath: string;
