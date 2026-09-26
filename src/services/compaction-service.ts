@@ -12,7 +12,7 @@
  *
  * Scope: this is purely a layout transformation. Schema is preserved
  * exactly (`SELECT *` with `union_by_name=true`), records are sorted by
- * `signalk_timestamp`, and writes go through a temp-file + atomic-rename
+ * schema-v2 `event_time`, and writes go through a temp-file + atomic-rename
  * pattern so a partial run never corrupts the partition.
  *
  * After compaction the year directory contains one file like
@@ -728,7 +728,7 @@ export class CompactionService {
     const query = `
       COPY (
         SELECT * FROM read_parquet([${fileListSql}], union_by_name=true)
-        ORDER BY signalk_timestamp
+        ORDER BY event_time
       ) TO '${tempFileSql}'
         (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9, ROW_GROUP_SIZE 16384);
     `;

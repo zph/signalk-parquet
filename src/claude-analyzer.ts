@@ -1099,7 +1099,7 @@ Please structure your response as JSON with the following format:
 
 ANALYSIS SCOPE: Focus your analysis on data between ${request.timeRange.start.toISOString().replace('.000Z', 'Z')} and ${request.timeRange.end.toISOString().replace('.000Z', 'Z')}.
 IMPORTANT: Always include WHERE clauses in your SQL queries to filter results to this time range:
-WHERE signalk_timestamp >= '${request.timeRange.start.toISOString().replace('.000Z', 'Z')}' AND signalk_timestamp <= '${request.timeRange.end.toISOString().replace('.000Z', 'Z')}'`;
+WHERE event_time >= '${request.timeRange.start.toISOString().replace('.000Z', 'Z')}' AND event_time <= '${request.timeRange.end.toISOString().replace('.000Z', 'Z')}'`;
       } else {
         // Default to recent data if no time range specified
         const now = new Date();
@@ -1108,7 +1108,7 @@ WHERE signalk_timestamp >= '${request.timeRange.start.toISOString().replace('.00
 
 TIME RANGE FOCUS: Since no specific time range was provided, focus on recent data (last 6 hours).
 IMPORTANT: Always include WHERE clauses to limit results to recent data:
-WHERE signalk_timestamp >= '${sixHoursAgo.toISOString().replace('.000Z', 'Z')}'`;
+WHERE event_time >= '${sixHoursAgo.toISOString().replace('.000Z', 'Z')}'`;
       }
 
       // Get system timezone for timestamp interpretation
@@ -1145,13 +1145,13 @@ CRITICAL FOR TOKEN EFFICIENCY:
 - NEVER query raw individual records - ALWAYS use time bucketing and aggregation
 - MANDATORY SQL pattern for all data queries:
   SELECT 
-    strftime(date_trunc('hour', signalk_timestamp::TIMESTAMP), '%Y-%m-%dT%H:%M:%SZ') as time_bucket,
+    strftime(date_trunc('hour', event_time), '%Y-%m-%dT%H:%M:%SZ') as time_bucket,
     AVG(CAST(value AS DOUBLE)) as avg_value,
     MAX(CAST(value AS DOUBLE)) as max_value, 
     MIN(CAST(value AS DOUBLE)) as min_value,
     COUNT(*) as record_count
   FROM read_parquet('path/*.parquet', union_by_name=true) 
-  WHERE signalk_timestamp >= 'start_time' AND signalk_timestamp <= 'end_time'
+  WHERE event_time >= 'start_time' AND event_time <= 'end_time'
     AND value IS NOT NULL
   GROUP BY time_bucket 
   ORDER BY time_bucket
@@ -1178,18 +1178,18 @@ Use scattermapbox for detailed coastal/harbor views, scattergeo for broader geog
 SPATIAL QUERY PATTERNS for position analysis:
 - Distance between consecutive positions:
   WITH positions AS (
-    SELECT signalk_timestamp, ST_Point(value_longitude, value_latitude) as point,
-           LAG(ST_Point(value_longitude, value_latitude)) OVER (ORDER BY signalk_timestamp) as prev_point
+    SELECT event_time, ST_Point(value_longitude, value_latitude) as point,
+           LAG(ST_Point(value_longitude, value_latitude)) OVER (ORDER BY event_time) as prev_point
     FROM read_parquet('path/*.parquet', union_by_name=true)
     WHERE value_latitude IS NOT NULL AND value_longitude IS NOT NULL
   )
-  SELECT signalk_timestamp,
+  SELECT event_time,
          ST_Distance_Sphere(point, prev_point) as distance_meters
   FROM positions WHERE prev_point IS NOT NULL;
 
 - Movement analysis with time bucketing:
   SELECT
-    strftime(date_trunc('hour', signalk_timestamp::TIMESTAMP), '%Y-%m-%dT%H:%M:%SZ') as time_bucket,
+    strftime(date_trunc('hour', event_time), '%Y-%m-%dT%H:%M:%SZ') as time_bucket,
     ST_AsText(ST_Centroid(ST_Collect(ST_Point(value_longitude, value_latitude)))) as centroid,
     ST_AsText(ST_ConvexHull(ST_Collect(ST_Point(value_longitude, value_latitude)))) as movement_area,
     SUM(distance_calculations) as total_distance
@@ -1259,7 +1259,7 @@ CRITICAL: Before executing ANY query, you MUST:
 4. If requested range exceeds available data, use ALL available data and state the actual range used
 
 QUERY EXECUTION RULES:
-- For time-based requests, FIRST run: SELECT MIN(signalk_timestamp), MAX(signalk_timestamp) FROM relevant_table
+- For time-based requests, FIRST run: SELECT MIN(event_time), MAX(event_time) FROM relevant_table
 - Use the full available range, not arbitrary subsets
 - State actual data range used in response
 - If user asks for "7 days" but only 3 days exist, use all 3 days and explain
@@ -1405,13 +1405,13 @@ CRITICAL FOR TOKEN EFFICIENCY:
 - NEVER query raw individual records - ALWAYS use time bucketing and aggregation
 - MANDATORY SQL pattern for all data queries:
   SELECT 
-    strftime(date_trunc('hour', signalk_timestamp::TIMESTAMP), '%Y-%m-%dT%H:%M:%SZ') as time_bucket,
+    strftime(date_trunc('hour', event_time), '%Y-%m-%dT%H:%M:%SZ') as time_bucket,
     AVG(CAST(value AS DOUBLE)) as avg_value,
     MAX(CAST(value AS DOUBLE)) as max_value, 
     MIN(CAST(value AS DOUBLE)) as min_value,
     COUNT(*) as record_count
   FROM read_parquet('path/*.parquet', union_by_name=true) 
-  WHERE signalk_timestamp >= 'start_time' AND signalk_timestamp <= 'end_time'
+  WHERE event_time >= 'start_time' AND event_time <= 'end_time'
     AND value IS NOT NULL
   GROUP BY time_bucket 
   ORDER BY time_bucket
@@ -2488,8 +2488,7 @@ Begin your analysis by querying relevant data within the specified time range.`;
             currentData[path] = {
               value: latestRecord.value,
               timestamp:
-                latestRecord.signalk_timestamp ||
-                latestRecord.received_timestamp,
+                latestRecord.event_time || latestRecord.received_timestamp,
               source: latestRecord.source_label,
             };
             dataFound = true;
@@ -2553,8 +2552,7 @@ Begin your analysis by querying relevant data within the specified time range.`;
             allVesselData[context][path] = {
               value: latestRecord.value,
               timestamp:
-                latestRecord.signalk_timestamp ||
-                latestRecord.received_timestamp,
+                latestRecord.event_time || latestRecord.received_timestamp,
               source: latestRecord.source_label,
             };
           }
@@ -2991,22 +2989,22 @@ Begin your analysis by querying relevant data within the specified time range.`;
     // Build the episode boundary detection SQL
     let timeConstraint = '';
     if (timeRange?.start && timeRange?.end) {
-      timeConstraint = `WHERE signalk_timestamp >= '${timeRange.start}' AND signalk_timestamp <= '${timeRange.end}'`;
+      timeConstraint = `WHERE event_time >= '${timeRange.start}' AND event_time <= '${timeRange.end}'`;
     }
 
     const episodeSQL = `
       WITH transitions AS (
         SELECT
-          signalk_timestamp,
+          event_time,
           CAST(value AS BOOLEAN) as current_value,
-          LAG(CAST(value AS BOOLEAN)) OVER (ORDER BY signalk_timestamp) as previous_value
+          LAG(CAST(value AS BOOLEAN)) OVER (ORDER BY event_time) as previous_value
         FROM read_parquet('${escapeSqlString(this.dataDirectory || '')}/vessels/*/commands/${escapeSqlString(regimenName)}/*.parquet', union_by_name=true)
         ${timeConstraint}
-        ORDER BY signalk_timestamp
+        ORDER BY event_time
       ),
       episode_boundaries AS (
         SELECT
-          signalk_timestamp,
+          event_time,
           current_value,
           CASE
             WHEN current_value = true AND (previous_value = false OR previous_value IS NULL) THEN 'start'
@@ -3019,20 +3017,20 @@ Begin your analysis by querying relevant data within the specified time range.`;
       ),
       episodes AS (
         SELECT
-          starts.signalk_timestamp as start_time,
-          ends.signalk_timestamp as end_time,
+          starts.event_time as start_time,
+          ends.event_time as end_time,
           CASE 
-            WHEN ends.signalk_timestamp IS NULL THEN 'active'
+            WHEN ends.event_time IS NULL THEN 'active'
             ELSE 'completed'
           END as status
         FROM 
-          (SELECT signalk_timestamp FROM episode_boundaries WHERE boundary_type = 'start') starts
+          (SELECT event_time FROM episode_boundaries WHERE boundary_type = 'start') starts
         LEFT JOIN 
-          (SELECT signalk_timestamp FROM episode_boundaries WHERE boundary_type = 'end') ends
-        ON ends.signalk_timestamp = (
-          SELECT MIN(signalk_timestamp) 
+          (SELECT event_time FROM episode_boundaries WHERE boundary_type = 'end') ends
+        ON ends.event_time = (
+          SELECT MIN(event_time)
           FROM episode_boundaries 
-          WHERE boundary_type = 'end' AND signalk_timestamp > starts.signalk_timestamp
+          WHERE boundary_type = 'end' AND event_time > starts.event_time
         )
       )
       SELECT 
@@ -3367,8 +3365,8 @@ COLUMN STRUCTURE:
 - context (VARCHAR): Vessel/source identifier (e.g., "${selfContext}")
 - meta (VARCHAR): Metadata (usually null)
 - path (VARCHAR): SignalK data path (e.g., "navigation.position", "environment.wind.speedTrue")
-- received_timestamp (VARCHAR): ISO timestamp when data was received (e.g., "YYYY-MM-DDTHH:MM:SS.sssZ")
-- signalk_timestamp (VARCHAR): ISO timestamp from SignalK data (e.g., "YYYY-MM-DDTHH:MM:SSZ")
+- event_time (TIMESTAMP): Signal K measurement time
+- received_delay_us (BIGINT): signed microseconds from event_time to receipt; reconstruct with event_time + received_delay_us * INTERVAL '1 microsecond'
 - source (VARCHAR): JSON string with source info (e.g., '{"sentence":"GLL","talker":"GN","type":"NMEA0183"}')
 - source_label (VARCHAR): Source device label (e.g., "maiana.GN")
 - source_pgn, source_src (VARCHAR): Usually null for NMEA0183
@@ -3378,35 +3376,35 @@ COLUMN STRUCTURE:
 - value_latitude, value_longitude (DOUBLE): Extracted position coordinates
 
 MANDATORY QUERY SYNTAX - USE EXACT FILE PATHS:
-- Recent position: SELECT received_timestamp, value_latitude, value_longitude FROM read_parquet('${dataDir}/${selfContextPath}/navigation/position/*.parquet', union_by_name=true) ORDER BY received_timestamp DESC LIMIT 100
-- Speed analysis: SELECT AVG(CAST(value AS DOUBLE)) as avg_speed FROM read_parquet('${dataDir}/${selfContextPath}/navigation/speedOverGround/*.parquet', union_by_name=true) WHERE signalk_timestamp >= '2024-01-01T00:00:00Z'
-- Wind patterns: SELECT DATE_TRUNC('hour', CAST(received_timestamp AS TIMESTAMP)) as hour, AVG(CAST(value AS DOUBLE)) FROM read_parquet('${dataDir}/${selfContextPath}/environment/wind/speedTrue/*.parquet', union_by_name=true) GROUP BY hour ORDER BY hour
-- Time-based filtering: WHERE signalk_timestamp >= 'YYYY-MM-DDTHH:MM:SSZ' AND signalk_timestamp <= 'YYYY-MM-DDTHH:MM:SSZ'
+- Recent position: SELECT event_time, value_latitude, value_longitude FROM read_parquet('${dataDir}/${selfContextPath}/navigation/position/*.parquet', union_by_name=true) ORDER BY event_time DESC LIMIT 100
+- Speed analysis: SELECT AVG(CAST(value AS DOUBLE)) as avg_speed FROM read_parquet('${dataDir}/${selfContextPath}/navigation/speedOverGround/*.parquet', union_by_name=true) WHERE event_time >= '2024-01-01T00:00:00Z'
+- Wind patterns: SELECT DATE_TRUNC('hour', event_time) as hour, AVG(CAST(value AS DOUBLE)) FROM read_parquet('${dataDir}/${selfContextPath}/environment/wind/speedTrue/*.parquet', union_by_name=true) GROUP BY hour ORDER BY hour
+- Time-based filtering: WHERE event_time >= 'YYYY-MM-DDTHH:MM:SSZ' AND event_time <= 'YYYY-MM-DDTHH:MM:SSZ'
 
 SPATIAL QUERY EXAMPLES - Advanced Geographic Analysis:
 - Track distance calculation:
   WITH ordered_positions AS (
-    SELECT signalk_timestamp, ST_Point(value_longitude, value_latitude) as position,
-           LAG(ST_Point(value_longitude, value_latitude)) OVER (ORDER BY signalk_timestamp) as prev_position
+    SELECT event_time, ST_Point(value_longitude, value_latitude) as position,
+           LAG(ST_Point(value_longitude, value_latitude)) OVER (ORDER BY event_time) as prev_position
     FROM read_parquet('${dataDir}/${selfContextPath}/navigation/position/*.parquet', union_by_name=true)
-    WHERE signalk_timestamp >= 'start_time' AND signalk_timestamp <= 'end_time'
+    WHERE event_time >= 'start_time' AND event_time <= 'end_time'
       AND value_latitude IS NOT NULL AND value_longitude IS NOT NULL
   )
-  SELECT signalk_timestamp, ST_Distance_Sphere(position, prev_position) as distance_meters
+  SELECT event_time, ST_Distance_Sphere(position, prev_position) as distance_meters
   FROM ordered_positions WHERE prev_position IS NOT NULL;
 
 - Hourly movement summary:
   WITH ordered_positions AS (
-    SELECT signalk_timestamp, ST_Point(value_longitude, value_latitude) as position,
-           LAG(ST_Point(value_longitude, value_latitude)) OVER (ORDER BY signalk_timestamp) as prev_position
+    SELECT event_time, ST_Point(value_longitude, value_latitude) as position,
+           LAG(ST_Point(value_longitude, value_latitude)) OVER (ORDER BY event_time) as prev_position
     FROM read_parquet('${dataDir}/${selfContextPath}/navigation/position/*.parquet', union_by_name=true)
-    WHERE signalk_timestamp >= 'start_time' AND signalk_timestamp <= 'end_time'
+    WHERE event_time >= 'start_time' AND event_time <= 'end_time'
   ), distances AS (
     SELECT *, ST_Distance_Sphere(position, prev_position) as distance_meters
     FROM ordered_positions WHERE prev_position IS NOT NULL
   )
   SELECT
-    strftime(date_trunc('hour', signalk_timestamp::TIMESTAMP), '%Y-%m-%dT%H:%M:%SZ') as time_bucket,
+    strftime(date_trunc('hour', event_time), '%Y-%m-%dT%H:%M:%SZ') as time_bucket,
     ST_AsText(ST_Centroid(ST_Collect(position))) as centroid,
     SUM(distance_meters) as total_distance_meters,
     COUNT(*) as position_records
@@ -3418,8 +3416,8 @@ SPATIAL QUERY EXAMPLES - Advanced Geographic Analysis:
                            ST_Point(v2.value_longitude, v2.value_latitude)) as distance_meters
   FROM read_parquet('${dataDir}/vessels/*/navigation/position/*.parquet', union_by_name=true) v1
   JOIN read_parquet('${dataDir}/vessels/*/navigation/position/*.parquet', union_by_name=true) v2
-    ON v1.received_timestamp = v2.received_timestamp AND v1.context != v2.context
-  WHERE v1.signalk_timestamp >= 'start_time' AND v1.signalk_timestamp <= 'end_time';
+    ON v1.event_time = v2.event_time AND v1.context != v2.context
+  WHERE v1.event_time >= 'start_time' AND v1.event_time <= 'end_time';
 
 CRITICAL: Your vessel's data is at: ${dataDir}/${selfContextPath}/
 IMPORTANT: Use the vessel's MMSI from the VESSEL CONTEXT section above to filter data by context column.
@@ -3427,13 +3425,13 @@ Example: SELECT * FROM read_parquet('${dataDir}/${selfContextPath}/navigation/po
 
 MULTI-VESSEL QUERIES:
 - Find all vessels: SELECT DISTINCT context FROM read_parquet('${dataDir}/vessels/*/navigation/position/*.parquet', union_by_name=true)
-- All vessels positions: SELECT context, received_timestamp, value_latitude, value_longitude FROM read_parquet('${dataDir}/vessels/*/navigation/position/*.parquet', union_by_name=true) ORDER BY received_timestamp DESC
+- All vessels positions: SELECT context, event_time, value_latitude, value_longitude FROM read_parquet('${dataDir}/vessels/*/navigation/position/*.parquet', union_by_name=true) ORDER BY event_time DESC
 - Specific vessel by MMSI: SELECT * FROM read_parquet('${dataDir}/vessels/urn_mrn_imo_mmsi_123456789/navigation/position/*.parquet', union_by_name=true)
 - Vessel traffic analysis: SELECT context, COUNT(*) as message_count FROM read_parquet('${dataDir}/vessels/*/navigation/position/*.parquet', union_by_name=true) GROUP BY context
 
 IMPORTANT NOTES:
 - All timestamps are ISO strings in VARCHAR format, not milliseconds
-- Use CAST(signalk_timestamp AS TIMESTAMP) for date functions  
+- event_time is already a native TIMESTAMP; do not cast it to VARCHAR
 - Use CAST(value AS DOUBLE) to convert string numbers to numeric
 - Timestamps have NO milliseconds - format is always YYYY-MM-DDTHH:MM:SSZ
 - Position data: use value_latitude/value_longitude columns directly (they're already DOUBLE)

@@ -101,10 +101,14 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
     });
     const schema = await writer.createParquetSchema(records);
     expect(
-      Object.values(schema.fields as Record<string, ParquetField>).every(
+      Object.values(schema.schema as Record<string, ParquetField>).every(
         field => field.compression === ParquetCompression.ZSTD
       )
     ).to.equal(true);
+    expect(schema.schema.event_time.type).to.equal('TIMESTAMP_MICROS');
+    expect(schema.schema.received_delay_us.type).to.equal('INT64');
+    expect(schema.schema).not.to.have.property('signalk_timestamp');
+    expect(schema.schema).not.to.have.property('received_timestamp');
     await writer.writeRecords(zstdPath, records);
 
     const conn = await DuckDBPool.getConnection();
@@ -206,7 +210,7 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
     const conn = await DuckDBPool.getConnection();
     try {
       const result = await conn.runAndReadAll(
-        `SELECT value, signalk_timestamp FROM read_parquet('${toGlob(path.join(dir, files[0]))}') ORDER BY signalk_timestamp`
+        `SELECT value, event_time, received_delay_us FROM read_parquet('${toGlob(path.join(dir, files[0]))}') ORDER BY event_time`
       );
       const rows = result.getRowObjects() as Array<{ value: string }>;
       expect(rows.map(row => Number(row.value))).to.deep.equal([9, 11]);
@@ -216,6 +220,38 @@ describe('storage pipeline (SQLite buffer -> Parquet -> DuckDB)', function () {
       expect(
         metadata.getRowObjects().map(row => row.compression)
       ).to.deep.equal(['ZSTD']);
+    } finally {
+      conn.disconnectSync();
+    }
+  });
+
+  it('stores one native event timestamp and an exact receive-time delta', async () => {
+    const eventTime = '2024-06-01T10:00:00.125Z';
+    const record = scalarRecord('navigation.speedOverGround', 5, eventTime);
+    record.received_timestamp = '2024-06-01T10:00:00.432Z';
+    buffer.insert(record);
+
+    const exported = await exportService.exportDayToParquet(DAY);
+    expect(exported.errors).to.deep.equal([]);
+    const conn = await DuckDBPool.getConnection();
+    try {
+      const result = await conn.runAndReadAll(`
+        SELECT
+          typeof(event_time) AS event_type,
+          received_delay_us,
+          epoch_us(event_time + received_delay_us * INTERVAL '1 microsecond') AS received_time_us
+        FROM read_parquet('${toGlob(exported.filesCreated[0])}')
+      `);
+      const row = result.getRowObjects()[0] as {
+        event_type: string;
+        received_delay_us: bigint;
+        received_time_us: bigint;
+      };
+      expect(row.event_type).to.equal('TIMESTAMP');
+      expect(Number(row.received_delay_us)).to.equal(307000);
+      expect(Number(row.received_time_us)).to.equal(
+        Date.parse('2024-06-01T10:00:00.432Z') * 1000
+      );
     } finally {
       conn.disconnectSync();
     }

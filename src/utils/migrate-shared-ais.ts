@@ -86,7 +86,7 @@ export async function migrateSharedAis(
       const sources = `[${files.map(quote).join(',')}]`;
       await connection.runAndReadAll(
         `COPY (SELECT * FROM read_parquet(${sources}, union_by_name=true, hive_partitioning=false)
-          ORDER BY signalk_timestamp, received_timestamp, context)
+          ORDER BY event_time, received_delay_us, context)
          TO ${quote(output)} (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9)`
       );
       const counts = await connection.runAndReadAll(

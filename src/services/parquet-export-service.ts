@@ -421,7 +421,7 @@ export class ParquetExportService {
         const sourceSql = group.map(quote).join(', ');
         const sql = `COPY (
         SELECT * FROM read_parquet([${sourceSql}], union_by_name=true, hive_partitioning=false)
-        ORDER BY signalk_timestamp, received_timestamp, context, path
+        ORDER BY event_time, received_delay_us, context, path
       ) TO ${quote(temp)} (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9, ROW_GROUP_SIZE 16384);`;
         try {
           const connection = await DuckDBPool.getConnection();

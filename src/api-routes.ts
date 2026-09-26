@@ -2658,11 +2658,11 @@ export function registerApiRoutes(
               if (schema && schema.schema) {
                 const fields = schema.schema;
 
-                const receivedTimestamp = fields.received_timestamp
-                  ? fields.received_timestamp.type
+                const receivedDelay = fields.received_delay_us
+                  ? fields.received_delay_us.type
                   : 'MISSING';
-                const signalkTimestamp = fields.signalk_timestamp
-                  ? fields.signalk_timestamp.type
+                const eventTime = fields.event_time
+                  ? fields.event_time.type
                   : 'MISSING';
 
                 const valueFields: { [key: string]: string } = {};
@@ -2690,21 +2690,15 @@ export function registerApiRoutes(
                 let hasViolations = false;
                 const violations: string[] = [];
 
-                if (
-                  receivedTimestamp !== 'UTF8' &&
-                  receivedTimestamp !== 'MISSING'
-                ) {
+                if (receivedDelay !== 'INT64') {
                   violations.push(
-                    `received_timestamp should be UTF8, got ${receivedTimestamp}`
+                    `received_delay_us should be INT64, got ${receivedDelay}`
                   );
                   hasViolations = true;
                 }
-                if (
-                  signalkTimestamp !== 'UTF8' &&
-                  signalkTimestamp !== 'MISSING'
-                ) {
+                if (eventTime !== 'TIMESTAMP_MICROS') {
                   violations.push(
-                    `signalk_timestamp should be UTF8, got ${signalkTimestamp}`
+                    `event_time should be TIMESTAMP_MICROS, got ${eventTime}`
                   );
                   hasViolations = true;
                 }

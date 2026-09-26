@@ -1002,13 +1002,10 @@ export class HistoryAPI {
         // Bucket-lookup approach: instead of scanning all raw position data,
         // bucket by time resolution, grab FIRST lat/lon per bucket, then filter by bbox/radius.
         // This reads far less data than a full scan with spatial SQL.
-        const bucketExpr = bucketExprSql(
-          'signalk_timestamp',
-          timeResolutionMillis
-        );
+        const bucketExpr = bucketExprSql('event_time', timeResolutionMillis);
 
         // Build FROM: parquet UNION ALL buffer
-        const parquetFrom = `SELECT signalk_timestamp, value_latitude, value_longitude FROM (
+        const parquetFrom = `SELECT event_time, value_latitude, value_longitude FROM (
           SELECT * FROM read_parquet('${escapeSqlString(localFilePath)}', union_by_name=true, filename=true, hive_partitioning=false)
           WHERE filename NOT LIKE '%/processed/%'
           AND filename NOT LIKE '%/quarantine/%'
@@ -1056,7 +1053,7 @@ export class HistoryAPI {
               )
             : null;
           if (bufferSubquery) {
-            fromSource = `(${parquetFrom} UNION ALL SELECT signalk_timestamp, TRY_CAST(value_latitude AS DOUBLE) as value_latitude, TRY_CAST(value_longitude AS DOUBLE) as value_longitude FROM ${bufferSubquery})`;
+            fromSource = `(${parquetFrom} UNION ALL SELECT CAST(signalk_timestamp AS TIMESTAMP) AS event_time, TRY_CAST(value_latitude AS DOUBLE) as value_latitude, TRY_CAST(value_longitude AS DOUBLE) as value_longitude FROM ${bufferSubquery})`;
           }
         }
 
@@ -1067,8 +1064,8 @@ export class HistoryAPI {
             FIRST(TRY_CAST(value_longitude AS DOUBLE)) as lon
           FROM ${fromSource}
           WHERE
-            signalk_timestamp >= '${fromIso}'
-            AND signalk_timestamp < '${toIso}'
+            event_time >= '${fromIso}'
+            AND event_time < '${toIso}'
             AND TRY_CAST(value_latitude AS DOUBLE) IS NOT NULL
             AND TRY_CAST(value_longitude AS DOUBLE) IS NOT NULL
           GROUP BY timestamp
@@ -1523,7 +1520,7 @@ export class HistoryAPI {
           const connection = await DuckDBPool.getConnection();
           try {
             const bucketExpr = bucketExprSql(
-              'signalk_timestamp',
+              'event_time',
               timeResolutionMillis
             );
 
@@ -1541,7 +1538,7 @@ export class HistoryAPI {
             );
 
             // Build FROM: parquet UNION ALL buffer (for today's unexported data)
-            const parquetFrom = `SELECT signalk_timestamp, value_latitude, value_longitude FROM (
+            const parquetFrom = `SELECT event_time, value_latitude, value_longitude FROM (
               SELECT * FROM read_parquet('${escapeSqlString(posFilePath)}', union_by_name=true, filename=true, hive_partitioning=false)
               WHERE filename NOT LIKE '%/processed/%'
               AND filename NOT LIKE '%/quarantine/%'
@@ -1592,7 +1589,7 @@ export class HistoryAPI {
                   )
                 : null;
               if (bufferSubquery) {
-                fromSource = `(${parquetFrom} UNION ALL SELECT signalk_timestamp, TRY_CAST(value_latitude AS DOUBLE) as value_latitude, TRY_CAST(value_longitude AS DOUBLE) as value_longitude FROM ${bufferSubquery})`;
+                fromSource = `(${parquetFrom} UNION ALL SELECT CAST(signalk_timestamp AS TIMESTAMP) AS event_time, TRY_CAST(value_latitude AS DOUBLE) as value_latitude, TRY_CAST(value_longitude AS DOUBLE) as value_longitude FROM ${bufferSubquery})`;
               }
             }
 
@@ -1603,8 +1600,8 @@ export class HistoryAPI {
                 FIRST(TRY_CAST(value_longitude AS DOUBLE)) as lon
               FROM ${fromSource}
               WHERE
-                signalk_timestamp >= '${fromIso}'
-                AND signalk_timestamp < '${toIso}'
+                event_time >= '${fromIso}'
+                AND event_time < '${toIso}'
                 AND TRY_CAST(value_latitude AS DOUBLE) IS NOT NULL
                 AND TRY_CAST(value_longitude AS DOUBLE) IS NOT NULL
               GROUP BY timestamp
@@ -2007,23 +2004,23 @@ export class HistoryAPI {
             objectPaths.add(pathSpec.path); // Mark as object path
 
             // Build SELECT clause with one aggregate per component
-            const componentSelects = Array.from(
-              componentSchema.components.values()
-            )
-              .map(comp => {
-                // TRY_CAST handles mixed-type parquet files (some store lat/lon as VARCHAR)
-                const colExpr =
-                  comp.dataType === 'numeric'
-                    ? `TRY_CAST(${comp.columnName} AS DOUBLE)`
-                    : comp.columnName;
-                const aggExpr = getComponentAggregateExpression(
-                  pathSpec.aggregateMethod,
-                  comp.dataType,
-                  colExpr
-                );
-                return `${aggExpr} as ${comp.name}`;
-              })
-              .join(',\n              ');
+            const componentSelects = (timestampColumn: string) =>
+              Array.from(componentSchema.components.values())
+                .map(comp => {
+                  // TRY_CAST handles mixed-type parquet files (some store lat/lon as VARCHAR)
+                  const colExpr =
+                    comp.dataType === 'numeric'
+                      ? `TRY_CAST(${comp.columnName} AS DOUBLE)`
+                      : comp.columnName;
+                  const aggExpr = getComponentAggregateExpression(
+                    pathSpec.aggregateMethod,
+                    comp.dataType,
+                    colExpr,
+                    timestampColumn
+                  );
+                  return `${aggExpr} as ${comp.name}`;
+                })
+                .join(',\n              ');
 
             // Build WHERE clause to check for at least one non-null component
             const componentWhereConditions = Array.from(
@@ -2074,7 +2071,7 @@ export class HistoryAPI {
 
               // Source 1: tier parquet
               subqueries.push(`
-                SELECT ${objBucketExpr(objTsCol)} as timestamp, ${componentSelects}, 1 as priority
+                SELECT ${objBucketExpr(objTsCol)} as timestamp, ${componentSelects(objTsCol)}, 1 as priority
                 FROM ${fc} AS source_data
                 WHERE ${objTsCol} >= '${fromIso}' AND ${objTsCol} < '${toIso}' AND (${componentWhereConditions})${spatialWhereClause}${objSourceFilter}
                 GROUP BY timestamp`);
@@ -2094,7 +2091,7 @@ export class HistoryAPI {
                   pathSpec.filters
                 );
                 subqueries.push(`
-                SELECT ${objBucketExpr('signalk_timestamp')} as timestamp, ${componentSelects}, 2 as priority
+                SELECT ${objBucketExpr('signalk_timestamp')} as timestamp, ${componentSelects('signalk_timestamp')}, 2 as priority
                 FROM ${bufferSubquery} AS source_data
                 WHERE (${componentWhereConditions})${spatialWhereClause}
                 GROUP BY timestamp`);
@@ -2237,7 +2234,8 @@ export class HistoryAPI {
                   'raw',
                   false,
                   app,
-                  context as string
+                  context as string,
+                  'signalk_timestamp'
                 );
                 subqueries.push(`
                 SELECT ${bucketExpr('signalk_timestamp')} as timestamp, ${bufferAggExpr} as value, 2 as priority
@@ -2357,7 +2355,7 @@ export class HistoryAPI {
                 const componentSelects = Array.from(fallbackComponents.values())
                   .map(
                     comp =>
-                      `${getComponentAggregateExpression(pathSpec.aggregateMethod, comp.dataType, comp.columnName)} as ${comp.name}`
+                      `${getComponentAggregateExpression(pathSpec.aggregateMethod, comp.dataType, comp.columnName, 'signalk_timestamp')} as ${comp.name}`
                   )
                   .join(', ');
                 const bufferQuery = `
@@ -2407,7 +2405,8 @@ export class HistoryAPI {
                   'raw',
                   false,
                   app,
-                  context as string
+                  context as string,
+                  'signalk_timestamp'
                 );
                 const bufferQuery = `
                   SELECT
@@ -2977,10 +2976,10 @@ function getValueExpression(
 
 /**
  * Get the timestamp column name based on the tier.
- * Raw tier uses signalk_timestamp, aggregated tiers use bucket_time.
+ * Raw schema v2 uses event_time; aggregated tiers use bucket_time.
  */
 function getTierTimestampColumn(tier: string): string {
-  return tier === 'raw' ? 'signalk_timestamp' : 'bucket_time';
+  return tier === 'raw' ? 'event_time' : 'bucket_time';
 }
 
 /**
@@ -2994,11 +2993,19 @@ function getTierAggregateExpression(
   tier: string,
   hasValueJson: boolean,
   app?: any,
-  context?: string
+  context?: string,
+  rawTimestampColumn: string = 'event_time'
 ): string {
   // Raw tier: use original aggregate expression
   if (tier === 'raw') {
-    return getAggregateExpression(method, pathName, hasValueJson, app, context);
+    return getAggregateExpression(
+      method,
+      pathName,
+      hasValueJson,
+      app,
+      context,
+      rawTimestampColumn
+    );
   }
 
   // Aggregated tier: use pre-computed columns
@@ -3070,7 +3077,8 @@ function getAggregateExpression(
   pathName: string,
   hasValueJson: boolean,
   app?: any,
-  context?: string
+  context?: string,
+  timestampColumn: string = 'event_time'
 ): string {
   // String paths: can't AVG/MIN/MAX — use FIRST, LAST, or FIRST for average/default
   if (isStringPath(pathName)) {
@@ -3079,7 +3087,7 @@ function getAggregateExpression(
       case 'last':
         return `LAST(${valueExpr})`;
       case 'middle_index':
-        return middleIndexSql(valueExpr, getTierTimestampColumn('raw'));
+        return middleIndexSql(valueExpr, timestampColumn);
       case 'first':
       case 'average':
       case undefined:
@@ -3091,7 +3099,7 @@ function getAggregateExpression(
   const valueExpr = getValueExpression(pathName, hasValueJson);
 
   if (method === 'middle_index') {
-    return middleIndexSql(valueExpr, getTierTimestampColumn('raw'));
+    return middleIndexSql(valueExpr, timestampColumn);
   }
 
   // Use vector averaging for angular paths (heading, COG, wind direction, etc.)
@@ -3116,10 +3124,11 @@ function getAggregateExpression(
 function getComponentAggregateExpression(
   requestedMethod: AggregateMethod,
   dataType: ComponentInfo['dataType'],
-  colExpr: string
+  colExpr: string,
+  timestampColumn: string = 'event_time'
 ): string {
   if (requestedMethod === 'middle_index') {
-    return middleIndexSql(colExpr, getTierTimestampColumn('raw'));
+    return middleIndexSql(colExpr, timestampColumn);
   }
   if (dataType === 'numeric') {
     return `${getAggregateFunction(requestedMethod)}(${colExpr})`;
