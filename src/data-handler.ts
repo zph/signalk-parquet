@@ -1212,7 +1212,7 @@ export async function uploadVerifiedCloudObject(
       existingManifest.sha256 === descriptor.sha256 &&
       existingManifest.bytes === descriptor.bytes &&
       existingManifest.rows === descriptor.rows &&
-      (await remoteObjectMatches(client, target, cloudKey, descriptor))
+      (await remoteObjectMatches(client, target, cloudKey, descriptor, true))
     ) {
       if (deleteAfterUpload) await fs.unlink(filePath);
       return;

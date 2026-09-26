@@ -1640,6 +1640,27 @@ Comprehensive testing procedures are documented in `TESTING.md`. The testing gui
 - Performance testing
 - Error handling validation
 
+### Local S3 integration test
+
+The normal suite skips the real S3-protocol test. To run it against a disposable
+LocalStack S3 service in Podman (not a production bucket):
+
+```bash
+podman machine start
+podman run -d --rm --name parquet-localstack-test \
+  -p 127.0.0.1:19000:4566 -e SERVICES=s3 \
+  docker.io/localstack/localstack:4.12.0
+LOCALSTACK_S3_ENDPOINT=http://127.0.0.1:19000 \
+  ./node_modules/.bin/mocha --no-config --require tsx/cjs \
+  test/integration/localstack-s3.test.ts
+podman stop parquet-localstack-test
+```
+
+The test uses a random temporary bucket and checks uncommitted objects, verified
+uploads, cached DuckDB reads, corruption detection, and repair before deleting
+the local source file. The older image tag is intentional: newer LocalStack
+images require an auth token.
+
 ### Quick Test
 
 ```bash
