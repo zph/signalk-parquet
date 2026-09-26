@@ -50,7 +50,7 @@ async function main(): Promise<void> {
       const output = path.join(dir, 'shared.parquet');
       await conn.runAndReadAll(
         `COPY (SELECT * FROM read_parquet(${sourceList(group)}, union_by_name=true, hive_partitioning=false)
-          ORDER BY signalk_timestamp, received_timestamp, context)
+          ORDER BY event_time, received_delay_us, context)
          TO ${quote(output)} (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 3)`
       );
       sharedBytes += (await fs.stat(output)).size;

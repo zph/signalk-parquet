@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.44-beta.5
+
+- Raw Parquet schema v2 now stores `event_time` as a native microsecond
+  timestamp and `received_delay_us` as a signed integer. History and Track API
+  readers reconstruct/federate time without retaining two ISO timestamp
+  strings, and daily compaction sorts on the new durable columns.
+
 ## [0.7.44-beta.4] - 2026-09-10
 
 ### Security (PR #117, @msallin)
