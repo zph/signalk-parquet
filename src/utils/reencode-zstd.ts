@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { DuckDBInstance } from '@duckdb/node-api';
 import { globIn } from './glob-in';
 import { FileLease } from './file-lease';
+import { PARQUET_ROW_GROUP_SIZE, PARQUET_ZSTD_LEVEL } from '../constants';
 
 export interface ReencodeSummary {
   scanned: number;
@@ -93,7 +94,7 @@ export async function reencodeParquetDirectory(
         await connection.runAndReadAll(
           `COPY (SELECT * FROM read_parquet(${sqlPath(file)}, hive_partitioning=false))
            TO ${sqlPath(temp)}
-           (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9)`
+           (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL ${PARQUET_ZSTD_LEVEL}, ROW_GROUP_SIZE ${PARQUET_ROW_GROUP_SIZE})`
         );
         const output = await metadata(connection, temp);
         if (

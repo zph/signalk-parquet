@@ -300,14 +300,15 @@ async function writePathDaily(
   connection: Awaited<ReturnType<DuckDBInstance['connect']>>,
   groups: SourceGroup[],
   outputRoot: string,
-  typed: boolean
+  typed: boolean,
+  rowGroupSize = 16384
 ): Promise<{
   bytes: number;
   files: number;
   writeMs: number;
   taskFiles: Map<string, string>;
 }> {
-  const name = typed ? 'typed-path-daily-zstd9' : 'current-path-daily-zstd9';
+  const name = `${typed ? 'typed' : 'current'}-path-daily-zstd9-rg${rowGroupSize}`;
   const root = path.join(outputRoot, name);
   await fs.mkdir(root, { recursive: true });
   const started = performance.now();
@@ -338,7 +339,7 @@ async function writePathDaily(
       await connection.runAndReadAll(`
         COPY (SELECT * FROM (${expected}) ORDER BY ${order})
         TO ${quote(output)}
-        (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9, ROW_GROUP_SIZE 16384)
+        (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9, ROW_GROUP_SIZE ${rowGroupSize})
       `);
       const actual = `SELECT * FROM read_parquet(${quote(output)}, hive_partitioning=false)`;
       const difference = await connection.runAndReadAll(`
@@ -480,6 +481,7 @@ async function queryBenchmarks(
   connection: Awaited<ReturnType<DuckDBInstance['connect']>>,
   groups: SourceGroup[],
   currentFiles: Map<string, string>,
+  currentFiles64k: Map<string, string>,
   typedFiles: Map<string, string>,
   taskFiles6Rg262k: Map<string, string>,
   taskFiles9Rg16k: Map<string, string>,
@@ -520,6 +522,9 @@ async function queryBenchmarks(
     const current = group.days.map(day =>
       currentFiles.get(`${group.key}:${day}`)!
     );
+    const current64k = group.days.map(day =>
+      currentFiles64k.get(`${group.key}:${day}`)!
+    );
     const typed = group.days.map(day => typedFiles.get(`${group.key}:${day}`)!);
     const pathIdResult = await connection.runAndReadAll(
       `SELECT path_id FROM path_dim WHERE path = ${quote(group.pathValue)}`
@@ -541,6 +546,9 @@ async function queryBenchmarks(
          WHERE ${event} >= epoch_ms(${minMs}) AND ${event} < epoch_ms(${maxMs + 1})`,
       currentPathDailyZstd9: `SELECT ${baselineAggregate} AS value
          FROM read_parquet(${sourceList(current)}, hive_partitioning=false) src
+         WHERE ${event} >= epoch_ms(${minMs}) AND ${event} < epoch_ms(${maxMs + 1})`,
+      currentPathDailyZstd9Rg64k: `SELECT ${baselineAggregate} AS value
+         FROM read_parquet(${sourceList(current64k)}, hive_partitioning=false) src
          WHERE ${event} >= epoch_ms(${minMs}) AND ${event} < epoch_ms(${maxMs + 1})`,
       typedPathDailyZstd9: `SELECT ${baselineAggregate.replace(/src\./g, '')} AS value
          FROM read_parquet(${sourceList(typed)}, hive_partitioning=false)
@@ -594,6 +602,14 @@ async function main(): Promise<void> {
       false
     );
     console.error('Wrote current ZSTD-9/16K path-daily control');
+    const currentPathDaily64k = await writePathDaily(
+      connection,
+      groups,
+      outputRoot,
+      false,
+      65536
+    );
+    console.error('Wrote compatible ZSTD-9/64K path-daily candidate');
     const typedPathDaily = await writePathDaily(
       connection,
       groups,
@@ -637,6 +653,7 @@ async function main(): Promise<void> {
       connection,
       groups,
       currentPathDaily.taskFiles,
+      currentPathDaily64k.taskFiles,
       typedPathDaily.taskFiles,
       zstd6Rg262k.taskFiles,
       zstd9Rg16k.taskFiles,
@@ -671,6 +688,11 @@ async function main(): Promise<void> {
             bytes: currentPathDaily.bytes,
             files: currentPathDaily.files,
             writeMs: currentPathDaily.writeMs,
+          },
+          currentPathDailyZstd9Rg64k: {
+            bytes: currentPathDaily64k.bytes,
+            files: currentPathDaily64k.files,
+            writeMs: currentPathDaily64k.writeMs,
           },
           typedPathDailyZstd9: {
             bytes: typedPathDaily.bytes,

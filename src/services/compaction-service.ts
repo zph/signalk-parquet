@@ -37,6 +37,7 @@ import { ServerAPI } from '@signalk/server-api';
 import { DuckDBPool } from '../utils/duckdb-pool';
 import { HivePathBuilder, AggregationTier } from '../utils/hive-path-builder';
 import { ConcurrencyLimiter } from '../utils/concurrency-limiter';
+import { PARQUET_ROW_GROUP_SIZE, PARQUET_ZSTD_LEVEL } from '../constants';
 
 export interface CompactionConfig {
   baseDirectory: string;
@@ -730,7 +731,7 @@ export class CompactionService {
         SELECT * FROM read_parquet([${fileListSql}], union_by_name=true)
         ORDER BY signalk_timestamp
       ) TO '${tempFileSql}'
-        (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9, ROW_GROUP_SIZE 16384);
+        (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL ${PARQUET_ZSTD_LEVEL}, ROW_GROUP_SIZE ${PARQUET_ROW_GROUP_SIZE});
     `;
 
     const connection = await DuckDBPool.getConnection();

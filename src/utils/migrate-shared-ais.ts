@@ -6,6 +6,7 @@ import { globIn } from './glob-in';
 import { FileLease } from './file-lease';
 import { HivePathBuilder } from './hive-path-builder';
 import { SHARED_AIS_CONTEXT } from './ais-shared';
+import { PARQUET_ROW_GROUP_SIZE, PARQUET_ZSTD_LEVEL } from '../constants';
 
 export interface SharedAisMigrationSummary {
   sourceFiles: number;
@@ -87,7 +88,7 @@ export async function migrateSharedAis(
       await connection.runAndReadAll(
         `COPY (SELECT * FROM read_parquet(${sources}, union_by_name=true, hive_partitioning=false)
           ORDER BY signalk_timestamp, received_timestamp, context)
-         TO ${quote(output)} (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9)`
+         TO ${quote(output)} (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL ${PARQUET_ZSTD_LEVEL}, ROW_GROUP_SIZE ${PARQUET_ROW_GROUP_SIZE})`
       );
       const counts = await connection.runAndReadAll(
         `SELECT

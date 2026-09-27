@@ -15,6 +15,7 @@ import { globIn } from '../utils/glob-in';
 import { DuckDBPool } from '../utils/duckdb-pool';
 import { FileLease } from '../utils/file-lease';
 import { isAisVesselContext, SHARED_AIS_CONTEXT } from '../utils/ais-shared';
+import { PARQUET_ROW_GROUP_SIZE, PARQUET_ZSTD_LEVEL } from '../constants';
 
 export interface ExportServiceConfig {
   outputDirectory: string;
@@ -422,7 +423,7 @@ export class ParquetExportService {
         const sql = `COPY (
         SELECT * FROM read_parquet([${sourceSql}], union_by_name=true, hive_partitioning=false)
         ORDER BY signalk_timestamp, received_timestamp, context, path
-      ) TO ${quote(temp)} (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9, ROW_GROUP_SIZE 16384);`;
+      ) TO ${quote(temp)} (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL ${PARQUET_ZSTD_LEVEL}, ROW_GROUP_SIZE ${PARQUET_ROW_GROUP_SIZE});`;
         try {
           const connection = await DuckDBPool.getConnection();
           try {

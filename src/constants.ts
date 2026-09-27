@@ -49,3 +49,7 @@ export const IMPORT_JOB_TTL_MS = 30 * 60 * 1000;
  * cleanup loop yields after this many files.
  */
 export const CLEANUP_YIELD_INTERVAL = 200;
+
+/** Immutable Parquet settings for every offline DuckDB rewrite. */
+export const PARQUET_ZSTD_LEVEL = 9;
+export const PARQUET_ROW_GROUP_SIZE = 64 * 1024;

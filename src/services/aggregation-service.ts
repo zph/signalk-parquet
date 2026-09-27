@@ -18,7 +18,12 @@ import { ServerAPI } from '@signalk/server-api';
 import { DuckDBPool } from '../utils/duckdb-pool';
 import { HivePathBuilder, AggregationTier } from '../utils/hive-path-builder';
 import { isAngularPath } from '../utils/angular-paths';
-import { CLEANUP_YIELD_INTERVAL, POSITION_MAX_SPEED_MPS } from '../constants';
+import {
+  CLEANUP_YIELD_INTERVAL,
+  PARQUET_ROW_GROUP_SIZE,
+  PARQUET_ZSTD_LEVEL,
+  POSITION_MAX_SPEED_MPS,
+} from '../constants';
 import { PathRetentionRule, RetentionRuleSet } from '../utils/retention-rules';
 
 export interface AggregationConfig {
@@ -475,7 +480,7 @@ export class AggregationService {
           FROM read_parquet([${fileListStr}], union_by_name=true)
           GROUP BY bucket_time, context, path
           ORDER BY bucket_time
-        ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9);
+        ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL ${PARQUET_ZSTD_LEVEL}, ROW_GROUP_SIZE ${PARQUET_ROW_GROUP_SIZE});
       `;
     }
 
@@ -497,7 +502,7 @@ export class AggregationService {
         ) src
         GROUP BY time_bucket(INTERVAL '${intervalSeconds} seconds', src_bucket_time::TIMESTAMP), context, path
         ORDER BY 1
-      ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9);
+      ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL ${PARQUET_ZSTD_LEVEL}, ROW_GROUP_SIZE ${PARQUET_ROW_GROUP_SIZE});
     `;
   }
 
@@ -536,7 +541,7 @@ export class AggregationService {
           WHERE value IS NOT NULL AND TRY_CAST(value AS DOUBLE) IS NOT NULL
           GROUP BY bucket_time, context, path
           ORDER BY bucket_time
-        ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9);
+        ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL ${PARQUET_ZSTD_LEVEL}, ROW_GROUP_SIZE ${PARQUET_ROW_GROUP_SIZE});
       `;
     }
 
@@ -593,7 +598,7 @@ export class AggregationService {
         ) src
         GROUP BY time_bucket(INTERVAL '${intervalSeconds} seconds', src_bucket_time::TIMESTAMP), context, path
         ORDER BY 1
-      ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9);
+      ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL ${PARQUET_ZSTD_LEVEL}, ROW_GROUP_SIZE ${PARQUET_ROW_GROUP_SIZE});
     `;
   }
 
@@ -733,7 +738,7 @@ export class AggregationService {
          AND r.path = s.path
         WHERE r.rn = 1
         ORDER BY r.bucket_time
-      ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL 9);
+      ) TO '${outputFile}' (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL ${PARQUET_ZSTD_LEVEL}, ROW_GROUP_SIZE ${PARQUET_ROW_GROUP_SIZE});
     `;
   }
 
