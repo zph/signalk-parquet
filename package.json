@@ -9,6 +9,7 @@
     "reencode:zstd": "node dist/cli/reencode-zstd.js",
     "migrate:ais-shared": "node dist/cli/migrate-shared-ais.js",
     "benchmark:ais-shared": "node dist/cli/benchmark-shared-ais.js",
+    "benchmark:optimized-archive": "node dist/cli/benchmark-optimized-archive.js",
     "benchmark:compact-v1": "node tools/duckdb/benchmark-compact-v1.cjs",
     "watch": "tsc --watch",
     "clean": "rm -rf dist",
