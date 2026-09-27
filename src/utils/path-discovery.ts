@@ -338,8 +338,8 @@ async function checkPathHasDataInRangeHive(
       const query = `
         SELECT 1 as found
         FROM read_parquet('${escapeSqlString(filePath)}', union_by_name=true, filename=true, hive_partitioning=false)
-        WHERE event_time >= '${fromIso}'
-          AND event_time < '${toIso}'
+        WHERE signalk_timestamp >= '${fromIso}'
+          AND signalk_timestamp < '${toIso}'
           ${isAisVesselContext(String(context)) ? `AND context = '${escapeSqlString(String(context))}'` : ''}
           AND filename NOT LIKE '%/processed/%'
           AND filename NOT LIKE '%/quarantine/%'

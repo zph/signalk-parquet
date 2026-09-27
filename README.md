@@ -454,7 +454,6 @@ interface PathConfig {
   autoDiscovered?: boolean;
 }
 
-// Short-lived SQLite ingestion record. Parquet uses the durable schema below.
 interface DataRecord {
   received_timestamp: string;
   signalk_timestamp: string;
@@ -589,15 +588,12 @@ curl -X POST http://localhost:3000/plugins/signalk-parquet/api/migrate/cancel/{j
 
 ### Data Schema
 
-Raw Parquet uses schema v2. SQLite keeps the two incoming ISO strings only as
-the short-lived ingestion representation; they are converted at export.
-
-Each durable raw record contains:
+Each record contains:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `event_time` | TIMESTAMP (microseconds) | Original Signal K measurement time |
-| `received_delay_us` | BIGINT | Signed microseconds between measurement and receipt time |
+| `received_timestamp` | string | When the plugin received the data |
+| `signalk_timestamp` | string | Original SignalK timestamp |
 | `context` | string | SignalK context (e.g., `vessels.self`) |
 | `path` | string | SignalK path |
 | `value` | DOUBLE/BOOLEAN/INT64/UTF8 | **Smart typed values** - numbers stored as DOUBLE, booleans as BOOLEAN, etc. |
@@ -607,9 +603,6 @@ Each durable raw record contains:
 | `source_type` | string | Source type |
 | `source_pgn` | number | PGN number (if applicable) |
 | `meta` | string | Metadata information |
-
-Reconstruct receipt time exactly with
-`event_time + received_delay_us * INTERVAL '1 microsecond'`.
 
 #### Aggregated Tier Schema (5s, 60s, 1h)
 
@@ -711,7 +704,7 @@ This provides better compression, faster queries, and proper type safety for dat
 ```sql
 -- Get latest 10 records from navigation position
 SELECT * FROM read_parquet('/path/to/navigation/position/*.parquet', union_by_name=true)
-ORDER BY event_time DESC LIMIT 10;
+ORDER BY received_timestamp DESC LIMIT 10;
 
 -- Count total records
 SELECT COUNT(*) FROM read_parquet('/path/to/navigation/position/*.parquet', union_by_name=true);
@@ -719,11 +712,11 @@ SELECT COUNT(*) FROM read_parquet('/path/to/navigation/position/*.parquet', unio
 -- Filter by source
 SELECT * FROM read_parquet('/path/to/environment/wind/*.parquet', union_by_name=true)
 WHERE source_label = 'mqtt-weatherflow-udp'
-ORDER BY event_time DESC LIMIT 100;
+ORDER BY received_timestamp DESC LIMIT 100;
 
 -- Aggregate by hour
 SELECT
-  DATE_TRUNC('hour', event_time) as hour,
+  DATE_TRUNC('hour', received_timestamp::timestamp) as hour,
   AVG(value::double) as avg_value,
   COUNT(*) as record_count
 FROM read_parquet('/path/to/data/*.parquet', union_by_name=true)
@@ -737,12 +730,12 @@ ORDER BY hour;
 -- Calculate distance traveled over time
 WITH ordered_positions AS (
   SELECT
-    event_time,
+    signalk_timestamp,
     ST_Point(value_longitude, value_latitude) as position,
-    LAG(ST_Point(value_longitude, value_latitude)) OVER (ORDER BY event_time) as prev_position
+    LAG(ST_Point(value_longitude, value_latitude)) OVER (ORDER BY signalk_timestamp) as prev_position
   FROM read_parquet('data/vessels/urn_mrn_imo_mmsi_368396230/navigation/position/*.parquet', union_by_name=true)
-  WHERE event_time >= '2025-09-27T16:00:00Z'
-    AND event_time <= '2025-09-27T23:59:59Z'
+  WHERE signalk_timestamp >= '2025-09-27T16:00:00Z'
+    AND signalk_timestamp <= '2025-09-27T23:59:59Z'
     AND value_latitude IS NOT NULL AND value_longitude IS NOT NULL
 ),
 distances AS (
@@ -755,7 +748,7 @@ distances AS (
   FROM ordered_positions
 )
 SELECT
-  strftime(date_trunc('hour', event_time), '%Y-%m-%dT%H:%M:%SZ') as time_bucket,
+  strftime(date_trunc('hour', signalk_timestamp::TIMESTAMP), '%Y-%m-%dT%H:%M:%SZ') as time_bucket,
   AVG(value_latitude) as avg_lat,
   AVG(value_longitude) as avg_lon,
   ST_AsText(ST_Centroid(ST_Collect(position))) as centroid,
@@ -774,11 +767,11 @@ SELECT
     ST_Point(v1.value_longitude, v1.value_latitude),
     ST_Point(v2.value_longitude, v2.value_latitude)
   ) as distance_meters,
-  v1.event_time
+  v1.signalk_timestamp
 FROM read_parquet('data/vessels/*/navigation/position/*.parquet', union_by_name=true) v1
 JOIN read_parquet('data/vessels/*/navigation/position/*.parquet', union_by_name=true) v2
-  ON v1.event_time = v2.event_time AND v1.context != v2.context
-WHERE v1.event_time >= '2025-09-27T00:00:00Z'
+  ON v1.signalk_timestamp = v2.signalk_timestamp AND v1.context != v2.context
+WHERE v1.signalk_timestamp >= '2025-09-27T00:00:00Z'
   AND ST_Distance_Sphere(
     ST_Point(v1.value_longitude, v1.value_latitude),
     ST_Point(v2.value_longitude, v2.value_latitude)
@@ -788,15 +781,15 @@ ORDER BY distance_meters;
 -- Advanced movement analysis with bounding boxes
 WITH ordered_positions AS (
   SELECT
-    event_time,
+    signalk_timestamp,
     ST_Point(value_longitude, value_latitude) as position,
     value_latitude,
     value_longitude,
-    LAG(ST_Point(value_longitude, value_latitude)) OVER (ORDER BY event_time) as prev_position,
-    strftime(date_trunc('hour', event_time), '%Y-%m-%dT%H:%M:%SZ') as time_bucket
+    LAG(ST_Point(value_longitude, value_latitude)) OVER (ORDER BY signalk_timestamp) as prev_position,
+    strftime(date_trunc('hour', signalk_timestamp::TIMESTAMP), '%Y-%m-%dT%H:%M:%SZ') as time_bucket
   FROM read_parquet('data/vessels/urn_mrn_imo_mmsi_368396230/navigation/position/*.parquet', union_by_name=true)
-  WHERE event_time >= '2025-09-27T16:00:00Z'
-    AND event_time <= '2025-09-27T23:59:59Z'
+  WHERE signalk_timestamp >= '2025-09-27T16:00:00Z'
+    AND signalk_timestamp <= '2025-09-27T23:59:59Z'
     AND value_latitude IS NOT NULL AND value_longitude IS NOT NULL
 ),
 distances AS (

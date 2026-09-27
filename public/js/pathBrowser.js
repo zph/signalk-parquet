@@ -94,7 +94,7 @@ export function generateQueryForPath(signalkPath, directory) {
   // Use *.parquet for flat paths.
   const isHivePath = directory.includes('path=');
   const globPattern = isHivePath ? 'year=*/day=*/*.parquet' : '*.parquet';
-  const query = `SELECT * FROM read_parquet('${directory}/${globPattern}', union_by_name=true) ORDER BY event_time DESC LIMIT 10`;
+  const query = `SELECT * FROM read_parquet('${directory}/${globPattern}', union_by_name=true) ORDER BY received_timestamp DESC LIMIT 10`;
   setDataPathsQuery(query);
 }
 
@@ -118,9 +118,9 @@ export function generateExampleQueries() {
     const globPattern = isHivePath ? 'year=*/day=*/*.parquet' : '*.parquet';
 
     const examples = [
-      `SELECT * FROM read_parquet('${pathInfo.directory}/${globPattern}', union_by_name=true) ORDER BY event_time DESC LIMIT 10`,
+      `SELECT * FROM read_parquet('${pathInfo.directory}/${globPattern}', union_by_name=true) ORDER BY received_timestamp DESC LIMIT 10`,
       `SELECT COUNT(*) as total_records FROM read_parquet('${pathInfo.directory}/${globPattern}', union_by_name=true)`,
-      `SELECT event_time, received_delay_us, value, source_label FROM read_parquet('${pathInfo.directory}/${globPattern}', union_by_name=true) WHERE value IS NOT NULL ORDER BY event_time DESC LIMIT 10`,
+      `SELECT received_timestamp, value, source_label FROM read_parquet('${pathInfo.directory}/${globPattern}', union_by_name=true) WHERE value IS NOT NULL ORDER BY received_timestamp DESC LIMIT 10`,
     ];
 
     examples.forEach(query => {

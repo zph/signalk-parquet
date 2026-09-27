@@ -560,8 +560,8 @@ export class TrackProvider implements TrackApi {
     const sql = `
       SELECT DISTINCT context
       FROM read_parquet('${escapeSqlString(glob)}', hive_partitioning=false, union_by_name=true)
-      WHERE event_time >= '${escapeSqlString(window.fromIso)}'
-        AND event_time < '${escapeSqlString(window.toIso)}'${spatial}`;
+      WHERE signalk_timestamp >= '${escapeSqlString(window.fromIso)}'
+        AND signalk_timestamp < '${escapeSqlString(window.toIso)}'${spatial}`;
 
     const connection = await DuckDBPool.getConnection();
     try {
@@ -887,7 +887,7 @@ export class TrackProvider implements TrackApi {
           POSITION_PATH
         );
         sources.push(
-          `SELECT event_time AS signalk_timestamp, TRY_CAST(value_latitude AS DOUBLE) AS lat, TRY_CAST(value_longitude AS DOUBLE) AS lon ` +
+          `SELECT signalk_timestamp, TRY_CAST(value_latitude AS DOUBLE) AS lat, TRY_CAST(value_longitude AS DOUBLE) AS lon ` +
             `FROM (SELECT * FROM read_parquet('${escapeSqlString(glob)}', union_by_name=true, filename=true, hive_partitioning=false) WHERE ${FILENAME_EXCLUSIONS}${isAisVesselContext(String(context)) ? ` AND context = '${escapeSqlString(String(context))}'` : ''})`
         );
       }
@@ -911,7 +911,7 @@ export class TrackProvider implements TrackApi {
             buffer.getTableColumns(POSITION_PATH)
           );
           sources.push(
-            `SELECT CAST(signalk_timestamp AS TIMESTAMP) AS signalk_timestamp, value_latitude AS lat, value_longitude AS lon FROM ${subquery}`
+            `SELECT signalk_timestamp, value_latitude AS lat, value_longitude AS lon FROM ${subquery}`
           );
         }
       }
@@ -1008,7 +1008,7 @@ export class TrackProvider implements TrackApi {
           signalkPath
         );
         sources.push(
-          `SELECT event_time AS signalk_timestamp, ${parquetValue} AS value ` +
+          `SELECT signalk_timestamp, ${parquetValue} AS value ` +
             `FROM (SELECT * FROM read_parquet('${escapeSqlString(glob)}', union_by_name=true, filename=true, hive_partitioning=false) WHERE ${FILENAME_EXCLUSIONS}${isAisVesselContext(String(context)) ? ` AND context = '${escapeSqlString(String(context))}'` : ''})`
         );
       }
@@ -1030,9 +1030,7 @@ export class TrackProvider implements TrackApi {
             window.fromIso,
             window.toIso
           );
-          sources.push(
-            `SELECT CAST(signalk_timestamp AS TIMESTAMP) AS signalk_timestamp, value FROM ${subquery}`
-          );
+          sources.push(`SELECT signalk_timestamp, value FROM ${subquery}`);
         }
       }
       if (sources.length === 0) {

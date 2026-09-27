@@ -392,7 +392,7 @@ export class AggregationService {
     const tempFile = outputFile + '.tmp';
 
     // Use different query depending on source tier schema and whether the path is angular/position
-    // Raw schema v2 has: event_time, value (or position columns).
+    // Raw tier has: received_timestamp, value (or value_latitude/value_longitude for position)
     // Aggregated tiers have: bucket_time, value_avg/value_latitude, value_min, value_max, sample_count, first_timestamp, last_timestamp
     const angular =
       !isPosition && isAngularPath(signalkPath, this.app, context);
@@ -463,15 +463,15 @@ export class AggregationService {
       return `
         COPY (
           SELECT
-            time_bucket(INTERVAL '${intervalSeconds} seconds', event_time) as bucket_time,
+            time_bucket(INTERVAL '${intervalSeconds} seconds', received_timestamp::TIMESTAMP) as bucket_time,
             context,
             path,
             AVG(CASE WHEN value IS NOT NULL AND TRY_CAST(value AS DOUBLE) IS NOT NULL THEN CAST(value AS DOUBLE) END) as value_avg,
             MIN(CASE WHEN value IS NOT NULL AND TRY_CAST(value AS DOUBLE) IS NOT NULL THEN CAST(value AS DOUBLE) END) as value_min,
             MAX(CASE WHEN value IS NOT NULL AND TRY_CAST(value AS DOUBLE) IS NOT NULL THEN CAST(value AS DOUBLE) END) as value_max,
             COUNT(*) as sample_count,
-            MIN(event_time) as first_timestamp,
-            MAX(event_time) as last_timestamp
+            MIN(received_timestamp) as first_timestamp,
+            MAX(received_timestamp) as last_timestamp
           FROM read_parquet([${fileListStr}], union_by_name=true)
           GROUP BY bucket_time, context, path
           ORDER BY bucket_time
@@ -518,7 +518,7 @@ export class AggregationService {
       return `
         COPY (
           SELECT
-            time_bucket(INTERVAL '${intervalSeconds} seconds', event_time) as bucket_time,
+            time_bucket(INTERVAL '${intervalSeconds} seconds', received_timestamp::TIMESTAMP) as bucket_time,
             context,
             path,
             ATAN2(
@@ -530,8 +530,8 @@ export class AggregationService {
             COUNT(*) as sample_count,
             AVG(SIN(CAST(value AS DOUBLE))) as value_sin_avg,
             AVG(COS(CAST(value AS DOUBLE))) as value_cos_avg,
-            MIN(event_time) as first_timestamp,
-            MAX(event_time) as last_timestamp
+            MIN(received_timestamp) as first_timestamp,
+            MAX(received_timestamp) as last_timestamp
           FROM read_parquet([${fileListStr}], union_by_name=true)
           WHERE value IS NOT NULL AND TRY_CAST(value AS DOUBLE) IS NOT NULL
           GROUP BY bucket_time, context, path
@@ -631,12 +631,12 @@ export class AggregationService {
     `;
 
     // Source columns differ between raw and aggregated tiers.
-    // Raw schema v2: event_time, value_latitude, value_longitude.
+    // Raw: received_timestamp, value_latitude, value_longitude
     // Aggregated: bucket_time (as timestamp), value_latitude, value_longitude, sample_count, first_timestamp, last_timestamp
-    const tsCol = isSourceRaw ? 'event_time' : 'bucket_time';
+    const tsCol = isSourceRaw ? 'received_timestamp' : 'bucket_time';
     const srcSampleCount = isSourceRaw ? '1::BIGINT' : 'sample_count';
-    const srcFirstTs = isSourceRaw ? 'event_time' : 'first_timestamp';
-    const srcLastTs = isSourceRaw ? 'event_time' : 'last_timestamp';
+    const srcFirstTs = isSourceRaw ? 'received_timestamp' : 'first_timestamp';
+    const srcLastTs = isSourceRaw ? 'received_timestamp' : 'last_timestamp';
 
     return `
       COPY (

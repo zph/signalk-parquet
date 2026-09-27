@@ -101,7 +101,7 @@ async function resolveTrueContexts(
 
 /**
  * SELECT DISTINCT context over one sanitized context directory's data files,
- * optionally constrained to an event_time range. Returns null when the
+ * optionally constrained to a signalk_timestamp range. Returns null when the
  * query fails (caller falls back).
  */
 async function queryDistinctContexts(
@@ -119,7 +119,7 @@ async function queryDistinctContexts(
     '*.parquet'
   );
   const rangeClause = range
-    ? ` WHERE event_time >= '${escapeSqlString(range.fromIso)}' AND event_time <= '${escapeSqlString(range.toIso)}'`
+    ? ` WHERE signalk_timestamp >= '${escapeSqlString(range.fromIso)}' AND signalk_timestamp <= '${escapeSqlString(range.toIso)}'`
     : '';
   try {
     const connection = await DuckDBPool.getConnection();
@@ -384,8 +384,8 @@ export async function getContextsInSpatialFilter(
   const query = `
     SELECT DISTINCT context
     FROM read_parquet('${escapeSqlString(glob)}', hive_partitioning=false, union_by_name=true)
-    WHERE event_time >= '${fromIso}'
-      AND event_time < '${toIso}'
+    WHERE signalk_timestamp >= '${fromIso}'
+      AND signalk_timestamp < '${toIso}'
       AND ${spatialClause}
   `;
 

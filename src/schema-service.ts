@@ -1,7 +1,7 @@
 import * as fs from 'fs-extra';
 import * as path from 'path';
 import { ServerAPI } from '@signalk/server-api';
-import { ParquetCompression } from './types';
+import { DataRecord, ParquetCompression } from './types';
 import './utils/zstd-parquet-codec';
 
 // Import parquet dynamically
@@ -60,7 +60,7 @@ export class SchemaService {
    * Extracted and consolidated from createParquetSchema() in parquet-writer.ts
    */
   async detectOptimalSchema(
-    records: Array<Record<string, any>>,
+    records: DataRecord[],
     currentPath?: string
   ): Promise<SchemaDetectionResult> {
     if (!parquet || records.length === 0) {
@@ -114,27 +114,10 @@ export class SchemaService {
         continue;
       }
 
-      // Schema v2 stores event time natively and receipt time as a signed
-      // microsecond delta. This avoids two high-cardinality timestamp strings.
-      if (colName === 'event_time') {
-        schemaFields[colName] = {
-          type: 'TIMESTAMP_MICROS',
-          optional: false,
-          compression: this.compression,
-        };
-        continue;
-      }
-      if (colName === 'received_delay_us') {
-        schemaFields[colName] = {
-          type: 'INT64',
-          optional: false,
-          compression: this.compression,
-        };
-        continue;
-      }
-
-      // Force metadata and source identity columns to UTF8.
+      // Force timestamps, metadata, and source columns to UTF8
       if (
+        colName === 'received_timestamp' ||
+        colName === 'signalk_timestamp' ||
         colName === 'meta' ||
         colName.startsWith('source') ||
         colName === 'context' ||
@@ -298,19 +281,23 @@ export class SchemaService {
       const fields = schema.schema;
       const violations: string[] = [];
 
-      const eventTime = fields.event_time ? fields.event_time.type : 'MISSING';
-      const receivedDelay = fields.received_delay_us
-        ? fields.received_delay_us.type
+      // Check timestamps
+      const receivedTimestamp = fields.received_timestamp
+        ? fields.received_timestamp.type
+        : 'MISSING';
+      const signalkTimestamp = fields.signalk_timestamp
+        ? fields.signalk_timestamp.type
         : 'MISSING';
 
-      if (eventTime !== 'TIMESTAMP_MICROS') {
+      // Rule 1: Timestamps should be UTF8/VARCHAR
+      if (receivedTimestamp !== 'UTF8' && receivedTimestamp !== 'MISSING') {
         violations.push(
-          `event_time should be TIMESTAMP_MICROS, got ${eventTime}`
+          `received_timestamp should be UTF8, got ${receivedTimestamp}`
         );
       }
-      if (receivedDelay !== 'INT64') {
+      if (signalkTimestamp !== 'UTF8' && signalkTimestamp !== 'MISSING') {
         violations.push(
-          `received_delay_us should be INT64, got ${receivedDelay}`
+          `signalk_timestamp should be UTF8, got ${signalkTimestamp}`
         );
       }
 

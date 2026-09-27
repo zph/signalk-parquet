@@ -57,11 +57,12 @@ async function main() {
         schemasFound++;
         const fields = schema.schema;
 
-        const receivedDelay = fields.received_delay_us
-          ? fields.received_delay_us.type
+        // Check timestamps
+        const receivedTimestamp = fields.received_timestamp
+          ? fields.received_timestamp.type
           : 'MISSING';
-        const eventTime = fields.event_time
-          ? fields.event_time.type
+        const signalkTimestamp = fields.signalk_timestamp
+          ? fields.signalk_timestamp.type
           : 'MISSING';
 
         // Find all value fields
@@ -76,15 +77,16 @@ async function main() {
         let hasViolations = false;
         const violations: string[] = [];
 
-        if (receivedDelay !== 'INT64') {
+        // Rule 1: Timestamps should be UTF8/VARCHAR
+        if (receivedTimestamp !== 'UTF8' && receivedTimestamp !== 'MISSING') {
           violations.push(
-            `received_delay_us should be INT64, got ${receivedDelay}`
+            `received_timestamp should be UTF8, got ${receivedTimestamp}`
           );
           hasViolations = true;
         }
-        if (eventTime !== 'TIMESTAMP_MICROS') {
+        if (signalkTimestamp !== 'UTF8' && signalkTimestamp !== 'MISSING') {
           violations.push(
-            `event_time should be TIMESTAMP_MICROS, got ${eventTime}`
+            `signalk_timestamp should be UTF8, got ${signalkTimestamp}`
           );
           hasViolations = true;
         }
@@ -117,15 +119,15 @@ async function main() {
         if (hasViolations) {
           violationSchemas++;
           console.log(`${filePath}: SCHEMA VIOLATIONS`);
-          console.log(`  received_delay_us: ${receivedDelay}`);
-          console.log(`  event_time: ${eventTime}`);
+          console.log(`  received_timestamp: ${receivedTimestamp}`);
+          console.log(`  signalk_timestamp: ${signalkTimestamp}`);
           console.log(`  value fields: ${JSON.stringify(valueFields)}`);
           console.log(`  VIOLATIONS: ${violations.join(', ')}`);
         } else {
           correctSchemas++;
           console.log(`${filePath}: OK`);
-          console.log(`  received_delay_us: ${receivedDelay}`);
-          console.log(`  event_time: ${eventTime}`);
+          console.log(`  received_timestamp: ${receivedTimestamp}`);
+          console.log(`  signalk_timestamp: ${signalkTimestamp}`);
           console.log(`  value fields: ${JSON.stringify(valueFields)}`);
         }
 

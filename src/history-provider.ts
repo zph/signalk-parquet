@@ -377,7 +377,7 @@ export class HistoryProvider implements HistoryApi {
       const sourceFilter = buildParquetFilterClause(filters, available);
 
       // Build parquet FROM clause with filename filtering
-      const parquetFrom = `(SELECT event_time AS signalk_timestamp, * EXCLUDE(event_time) FROM read_parquet('${escapeSqlString(filePath)}', union_by_name=true, filename=true) WHERE filename NOT LIKE '%/processed/%' AND filename NOT LIKE '%/quarantine/%' AND filename NOT LIKE '%/failed/%' AND filename NOT LIKE '%/repaired/%'${sourceFilter})`;
+      const parquetFrom = `(SELECT * FROM read_parquet('${escapeSqlString(filePath)}', union_by_name=true, filename=true) WHERE filename NOT LIKE '%/processed/%' AND filename NOT LIKE '%/quarantine/%' AND filename NOT LIKE '%/failed/%' AND filename NOT LIKE '%/repaired/%'${sourceFilter})`;
 
       if (componentSchema && componentSchema.components.size > 0) {
         // Object path - aggregate each component
@@ -449,7 +449,7 @@ export class HistoryProvider implements HistoryApi {
           federatedFrom = `(
               SELECT signalk_timestamp, ${componentCols} FROM ${parquetFrom}
               UNION ALL
-              SELECT CAST(signalk_timestamp AS TIMESTAMP) AS signalk_timestamp, ${componentCols} FROM ${bufferSubquery}
+              SELECT signalk_timestamp, ${componentCols} FROM ${bufferSubquery}
             )`;
         } else {
           federatedFrom = parquetFrom;
@@ -522,7 +522,7 @@ export class HistoryProvider implements HistoryApi {
           federatedFrom = `(
               SELECT signalk_timestamp, value FROM ${parquetFrom}
               UNION ALL
-              SELECT CAST(signalk_timestamp AS TIMESTAMP) AS signalk_timestamp, value FROM ${bufferSubquery}
+              SELECT signalk_timestamp, value FROM ${bufferSubquery}
             )`;
         } else {
           federatedFrom = parquetFrom;

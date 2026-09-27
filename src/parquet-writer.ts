@@ -9,7 +9,6 @@ import {
 import { ServerAPI } from '@signalk/server-api';
 import { SchemaService } from './schema-service';
 import './utils/zstd-parquet-codec';
-import { toStorageRecordV2 } from './storage-schema-v2';
 
 // Try to import ParquetJS, fall back if not available
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -309,7 +308,7 @@ export class ParquetWriter {
     }
 
     const result = await this.schemaService.detectOptimalSchema(
-      records.map(toStorageRecordV2),
+      records,
       currentPath
     );
     return result.schema;
@@ -609,7 +608,7 @@ export class ParquetWriter {
 
     // Serialize object fields to JSON strings (deferred from delta processing)
     // This improves performance by avoiding JSON.stringify() on every delta message
-    const recordWithSerializedFields = { ...toStorageRecordV2(record) };
+    const recordWithSerializedFields = { ...record };
     if (
       recordWithSerializedFields.source &&
       typeof recordWithSerializedFields.source === 'object'
@@ -686,11 +685,6 @@ export class ParquetWriter {
           case 'BOOLEAN':
             cleanRecord[fieldName] =
               typeof value === 'boolean' ? value : Boolean(value);
-            break;
-          case 'TIMESTAMP_MICROS':
-          case 'TIMESTAMP_MILLIS':
-            cleanRecord[fieldName] =
-              value instanceof Date ? value : new Date(String(value));
             break;
           case 'UTF8':
           default:
