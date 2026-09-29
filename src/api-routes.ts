@@ -42,7 +42,8 @@ import {
 } from './types';
 import { MigrationService } from './services/migration-service';
 import { GPX_UPLOAD_MAX_FILE_BYTES, GPX_UPLOAD_MAX_FILES } from './constants';
-import { uploadVerifiedCloudObject } from './data-handler';
+import { commitCloudObjects, uploadVerifiedCloudObject } from './data-handler';
+import { CloudManifestObject } from './utils/s3-day-manifest';
 import {
   GpxImportService,
   DEFAULT_IMPORT_PATHS,
@@ -1017,6 +1018,7 @@ export function registerApiRoutes(
             return;
           }
 
+          const committedObjects: CloudManifestObject[] = [];
           for (let i = 0; i < filesToSync.length; i++) {
             const { key, localPath } = filesToSync[i];
             job.currentFile = path.basename(localPath);
@@ -1024,12 +1026,15 @@ export function registerApiRoutes(
             job.progress = 25 + Math.round(((i + 1) / filesToSync.length) * 75);
 
             try {
-              await uploadVerifiedCloudObject(
-                localPath,
-                key,
-                state.cloudClient,
-                cloudBucket,
-                false
+              committedObjects.push(
+                await uploadVerifiedCloudObject(
+                  localPath,
+                  key,
+                  state.cloudClient,
+                  cloudBucket,
+                  false,
+                  false
+                )
               );
               job.filesUploaded++;
               app.debug(`Synced to ${label}: ${key}`);
@@ -1037,6 +1042,20 @@ export function registerApiRoutes(
               job.filesFailed++;
               job.errors.push(`${key}: ${(err as Error).message}`);
             }
+          }
+
+          if (job.filesFailed === 0) {
+            job.phase = 'Committing daily inventories...';
+            await commitCloudObjects(
+              state.cloudClient,
+              cloudBucket,
+              cloud.keyPrefix || '',
+              committedObjects
+            );
+          } else {
+            throw new Error(
+              `${job.filesFailed} cloud object(s) failed; daily inventories were not changed`
+            );
           }
 
           job.status = 'completed';

@@ -7,7 +7,7 @@ import {
   CreateBucketCommand,
   DeleteBucketCommand,
   DeleteObjectCommand,
-  GetObjectCommand,
+  ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -17,7 +17,8 @@ import {
   uploadVerifiedCloudObject,
 } from '../../src/data-handler';
 import { DuckDBPool } from '../../src/utils/duckdb-pool';
-import { S3ReadCache } from '../../src/utils/s3-read-cache';
+import { S3ManifestReader } from '../../src/utils/s3-manifest-reader';
+import { dayManifestBase } from '../../src/utils/s3-day-manifest';
 import { PluginConfig } from '../../src/types';
 import { ServerAPI } from '@signalk/server-api';
 
@@ -40,7 +41,7 @@ describe('LocalStack S3 archive round trip', function () {
     const doy = String(
       Math.floor((day.getTime() - Date.UTC(year, 0, 1)) / 86400000) + 1
     ).padStart(3, '0');
-    key = `history/tier=raw/year=${year}/day=${doy}/sample.parquet`;
+    key = `history/tier=raw/context=vessels__self/path=navigation__speedOverGround/year=${year}/day=${doy}/sample.parquet`;
     await DuckDBPool.initialize();
     const config = {
       cloudUpload: {
@@ -61,6 +62,15 @@ describe('LocalStack S3 archive round trip', function () {
     await initializeCloudSDK(config, app);
     client = createCloudClient(config, app) as S3Client;
     await client.send(new CreateBucketCommand({ Bucket: bucket }));
+    const parsedEndpoint = new URL(endpoint!);
+    await DuckDBPool.initializeS3({
+      accessKeyId: 'test',
+      secretAccessKey: 'test',
+      region: 'us-east-1',
+      endpoint: parsedEndpoint.host,
+      useSSL: parsedEndpoint.protocol === 'https:',
+      urlStyle: 'path',
+    });
     const connection = await DuckDBPool.getConnection();
     try {
       await connection.runAndReadAll(
@@ -73,10 +83,15 @@ describe('LocalStack S3 archive round trip', function () {
 
   after(async () => {
     if (client) {
-      await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
-      await client.send(
-        new DeleteObjectCommand({ Bucket: bucket, Key: `${key}.manifest.json` })
+      const listed = await client.send(
+        new ListObjectsV2Command({ Bucket: bucket })
       );
+      for (const object of listed.Contents || []) {
+        if (object.Key)
+          await client.send(
+            new DeleteObjectCommand({ Bucket: bucket, Key: object.Key })
+          );
+      }
       await client.send(new DeleteBucketCommand({ Bucket: bucket }));
       client.destroy();
     }
@@ -84,64 +99,52 @@ describe('LocalStack S3 archive round trip', function () {
     if (root) await fs.remove(root);
   });
 
-  it('requires a manifest, verifies reads, detects corruption, and repairs the object', async () => {
+  it('commits a day inventory and lets DuckDB range-read its explicit S3 key', async () => {
     const original = await fs.readFile(file);
-    const cache = new S3ReadCache(
-      path.join(root, 'cache'),
-      original.length * 2
-    );
     const day = new Date();
     const from = new Date(
       Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate())
     );
-    const prefix = 'history/tier=raw';
-    const lookup = () => cache.listAndCache(client, bucket, prefix, from, from);
+    const year = day.getUTCFullYear();
+    const doy = String(
+      Math.floor((day.getTime() - Date.UTC(year, 0, 1)) / 86400000) + 1
+    ).padStart(3, '0');
+    const prefix =
+      'history/tier=raw/context=vessels__self/path=navigation__speedOverGround/';
+    const reader = new S3ManifestReader(client, bucket, 'history');
+    const lookup = () => reader.listCommitted(prefix, from, from);
 
     await client.send(
       new PutObjectCommand({ Bucket: bucket, Key: key, Body: original })
     );
-    expect(await lookup()).to.deep.equal({ files: [], incomplete: true });
+    expect(await lookup()).to.deep.equal({ objects: [], incomplete: true });
 
     await uploadVerifiedCloudObject(file, key, client, bucket);
-    const manifestResponse = await client.send(
-      new GetObjectCommand({ Bucket: bucket, Key: `${key}.manifest.json` })
-    );
-    const manifest = JSON.parse(
-      await manifestResponse.Body!.transformToString()
-    );
-    expect(manifest.rows).to.equal(2);
-    expect(manifest.bytes).to.equal(original.length);
-
     const committed = await lookup();
     expect(committed.incomplete).to.equal(false);
-    expect(committed.files).to.have.length(1);
-    expect(await fs.readFile(committed.files[0])).to.deep.equal(original);
+    expect(committed.objects).to.have.length(1);
+    expect(committed.objects[0].rows).to.equal(2);
+    expect(committed.objects[0].bytes).to.equal(original.length);
     const connection = await DuckDBPool.getConnection();
     try {
       const reader = await connection.runAndReadAll(
-        `SELECT count(*) AS rows FROM read_parquet('${committed.files[0]}')`
+        `SELECT count(*) AS rows FROM read_parquet('s3://${bucket}/${committed.objects[0].key}')`
       );
       expect(Number(reader.getRows()[0][0])).to.equal(2);
     } finally {
       connection.disconnectSync();
     }
 
+    const pointerKey = `${dayManifestBase('history', year, doy)}/latest.json`;
     await client.send(
-      new PutObjectCommand({
-        Bucket: bucket,
-        Key: key,
-        Body: Buffer.alloc(original.length),
-        Metadata: { sha256: manifest.sha256, rows: '2' },
-      })
+      new PutObjectCommand({ Bucket: bucket, Key: pointerKey, Body: '{}' })
     );
-    const corrupt = await lookup();
-    expect(corrupt.files).to.deep.equal([]);
-    expect(corrupt.incomplete).to.equal(true);
+    expect(await lookup()).to.deep.equal({ objects: [], incomplete: true });
 
     await uploadVerifiedCloudObject(file, key, client, bucket, true);
     expect(await fs.pathExists(file)).to.equal(false);
     const repaired = await lookup();
     expect(repaired.incomplete).to.equal(false);
-    expect(await fs.readFile(repaired.files[0])).to.deep.equal(original);
+    expect(repaired.objects).to.have.length(1);
   });
 });

@@ -14,6 +14,7 @@ import {
 import { DuckDBPool } from '../../src/utils/duckdb-pool';
 import { PluginConfig } from '../../src/types';
 import { ServerAPI } from '@signalk/server-api';
+import { dayManifestBase } from '../../src/utils/s3-day-manifest';
 
 describe('transactional cloud archive upload', function () {
   this.timeout(30000);
@@ -88,22 +89,34 @@ describe('transactional cloud archive upload', function () {
 
   it('verifies the object, commits a manifest, then permits local deletion', async () => {
     const client = cloudClient();
-    const key = 'tier=raw/sample.parquet';
+    const key = 'tier=raw/year=2026/day=268/sample.parquet';
     await uploadVerifiedCloudObject(file, key, client, 'archive', true);
 
     expect(await fs.pathExists(file)).to.equal(false);
-    expect(client.puts).to.deep.equal([key, `${key}.manifest.json`]);
-    const manifest = JSON.parse(
-      client.objects.get(`${key}.manifest.json`)!.body.toString('utf8')
+    const base = dayManifestBase('', 2026, '268');
+    expect(client.puts[0]).to.equal(key);
+    expect(client.puts[1]).to.match(
+      new RegExp(`^${base}/[0-9a-f]{64}\\.json$`)
     );
-    expect(manifest.rows).to.equal(2);
-    expect(manifest.bytes).to.equal(client.objects.get(key)!.body.length);
-    expect(manifest.sha256).to.match(/^[0-9a-f]{64}$/);
+    expect(client.puts[2]).to.equal(`${base}/latest.json`);
+    const pointer = JSON.parse(
+      client.objects.get(`${base}/latest.json`)!.body.toString('utf8')
+    );
+    const manifest = JSON.parse(
+      client.objects.get(pointer.manifestKey)!.body.toString('utf8')
+    );
+    expect(manifest.version).to.equal(2);
+    expect(manifest.objects).to.have.length(1);
+    expect(manifest.objects[0].rows).to.equal(2);
+    expect(manifest.objects[0].bytes).to.equal(
+      client.objects.get(key)!.body.length
+    );
+    expect(manifest.objects[0].sha256).to.match(/^[0-9a-f]{64}$/);
   });
 
   it('keeps the local file and does not commit a manifest after a bad readback', async () => {
     const client = cloudClient(true);
-    const key = 'tier=raw/sample.parquet';
+    const key = 'tier=raw/year=2026/day=268/sample.parquet';
     try {
       await uploadVerifiedCloudObject(file, key, client, 'archive', true);
       expect.fail('Expected checksum verification to fail');
@@ -111,6 +124,30 @@ describe('transactional cloud archive upload', function () {
       expect((error as Error).message).to.include('verification');
     }
     expect(await fs.pathExists(file)).to.equal(true);
-    expect(client.objects.has(`${key}.manifest.json`)).to.equal(false);
+    expect(
+      client.objects.has(`${dayManifestBase('', 2026, '268')}/latest.json`)
+    ).to.equal(false);
+  });
+
+  it('merges later objects into the immutable day inventory', async () => {
+    const client = cloudClient();
+    const firstKey = 'tier=raw/year=2026/day=268/first.parquet';
+    const secondKey = 'tier=60s/year=2026/day=268/second.parquet';
+    const secondFile = path.join(root, 'second.parquet');
+    await fs.copy(file, secondFile);
+
+    await uploadVerifiedCloudObject(file, firstKey, client, 'archive');
+    await uploadVerifiedCloudObject(secondFile, secondKey, client, 'archive');
+
+    const base = dayManifestBase('', 2026, '268');
+    const pointer = JSON.parse(
+      client.objects.get(`${base}/latest.json`)!.body.toString('utf8')
+    );
+    const manifest = JSON.parse(
+      client.objects.get(pointer.manifestKey)!.body.toString('utf8')
+    );
+    expect(
+      manifest.objects.map((item: { key: string }) => item.key)
+    ).to.deep.equal([secondKey, firstKey].sort());
   });
 });

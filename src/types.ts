@@ -291,6 +291,7 @@ export interface CloudUploadConfig {
   secretAccessKey?: string;
   deleteAfterUpload?: boolean;
   readCacheMaxMB?: number;
+  cloudReadMode?: 'direct' | 'cache';
 }
 
 // SignalK Data Structures

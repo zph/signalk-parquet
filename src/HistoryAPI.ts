@@ -33,6 +33,7 @@ import {
 import { getPathComponentSchema, ComponentInfo } from './utils/schema-cache';
 import { ConcurrencyLimiter } from './utils/concurrency-limiter';
 import { S3ReadCache } from './utils/s3-read-cache';
+import { S3ManifestReader } from './utils/s3-manifest-reader';
 import { CONCURRENCY } from './config/cache-defaults';
 import { SQLiteBufferInterface } from './types';
 import { HivePathBuilder, AggregationTier } from './utils/hive-path-builder';
@@ -518,6 +519,7 @@ export interface S3QueryConfig {
   client?: any;
   cacheDirectory?: string;
   cacheMaxMB?: number;
+  readMode?: 'direct' | 'cache';
   /** Prevent cache reuse across different cloud endpoints or namespaces. */
   cacheNamespace?: string;
 }
@@ -778,6 +780,7 @@ export class HistoryAPI {
   private autoDiscoveryService?: AutoDiscoveryService;
   private s3Config?: S3QueryConfig;
   private s3ReadCache?: S3ReadCache;
+  private s3ManifestReader?: S3ManifestReader;
   private tierRetentionDays?: {
     exact: number;
     tenSecond: number;
@@ -807,6 +810,13 @@ export class HistoryAPI {
     this.hivePathBuilder = new HivePathBuilder();
     this.autoDiscoveryService = autoDiscoveryService;
     this.s3Config = s3Config;
+    this.s3ManifestReader = s3Config?.client
+      ? new S3ManifestReader(
+          s3Config.client,
+          s3Config.bucket,
+          s3Config.keyPrefix
+        )
+      : undefined;
     this.s3ReadCache = s3Config?.cacheDirectory
       ? new S3ReadCache(
           s3Config.cacheDirectory,
@@ -823,6 +833,9 @@ export class HistoryAPI {
    */
   setS3Config(config: S3QueryConfig | undefined): void {
     this.s3Config = config;
+    this.s3ManifestReader = config?.client
+      ? new S3ManifestReader(config.client, config.bucket, config.keyPrefix)
+      : undefined;
     this.s3ReadCache = config?.cacheDirectory
       ? new S3ReadCache(
           config.cacheDirectory,
@@ -832,7 +845,7 @@ export class HistoryAPI {
       : undefined;
   }
 
-  private async getCachedS3Files(
+  private async getCommittedS3Files(
     config: S3QueryConfig,
     tier: AggregationTier,
     context: string,
@@ -840,27 +853,38 @@ export class HistoryAPI {
     from: Date,
     to: Date
   ): Promise<{ source: string | null; incomplete: boolean }> {
-    if (!config.client || !this.s3ReadCache)
+    if (!config.client || !this.s3ManifestReader)
       return { source: null, incomplete: true };
-    const prefix = [
-      config.keyPrefix.replace(/\/$/, ''),
-      `tier=${tier}`,
-      `context=${this.hivePathBuilder.sanitizeContext(context)}`,
-      `path=${this.hivePathBuilder.sanitizePath(signalkPath)}`,
-    ]
-      .filter(Boolean)
-      .join('/');
-    const result = await this.s3ReadCache.listAndCache(
-      config.client,
-      config.bucket,
-      prefix,
-      from,
-      to
+    const prefix =
+      [
+        config.keyPrefix.replace(/\/$/, ''),
+        `tier=${tier}`,
+        `context=${this.hivePathBuilder.sanitizeContext(context)}`,
+        `path=${this.hivePathBuilder.sanitizePath(signalkPath)}`,
+      ]
+        .filter(Boolean)
+        .join('/') + '/';
+    const result = await this.s3ManifestReader.listCommitted(prefix, from, to);
+    if (config.readMode === 'cache') {
+      if (!this.s3ReadCache)
+        return { source: null, incomplete: result.objects.length > 0 };
+      const cached = await this.s3ReadCache.cacheCommitted(
+        config.client,
+        config.bucket,
+        result.objects
+      );
+      return {
+        source: cached.files.length
+          ? `cachelist:${JSON.stringify(cached.files)}`
+          : null,
+        incomplete: result.incomplete || cached.incomplete,
+      };
+    }
+    const uris = result.objects.map(
+      object => `s3://${config.bucket}/${object.key}`
     );
     return {
-      source: result.files.length
-        ? `cachelist:${JSON.stringify(result.files)}`
-        : null,
+      source: uris.length ? `s3list:${JSON.stringify(uris)}` : null,
       incomplete: result.incomplete,
     };
   }
@@ -1752,7 +1776,10 @@ export class HistoryAPI {
 
         // S3 supplements local for dates before the earliest local data
         if (s3Config?.enabled) {
-          if ((s3Config.cacheMaxMB ?? 512) <= 0) {
+          if (
+            s3Config.readMode === 'cache' &&
+            (s3Config.cacheMaxMB ?? 512) <= 0
+          ) {
             historyWarnings.add(
               'Cloud history is enabled, but the local S3 read cache is disabled; older cloud-only history was not queried.'
             );
@@ -1769,7 +1796,7 @@ export class HistoryAPI {
             // Only query S3 for the range before local data starts
             const s3ToDate = new Date(localEarliestDate.getTime() - 86400000); // day before local starts
             if (fromDate <= s3ToDate) {
-              const cloudFiles = await this.getCachedS3Files(
+              const cloudFiles = await this.getCommittedS3Files(
                 s3Config,
                 effectiveTier,
                 String(partitionContext),
@@ -1789,7 +1816,7 @@ export class HistoryAPI {
           } else if (!localEarliestDate) {
             // No local data at all — query S3 for full range
             localFilePath = null;
-            const cloudFiles = await this.getCachedS3Files(
+            const cloudFiles = await this.getCommittedS3Files(
               s3Config,
               effectiveTier,
               String(partitionContext),
@@ -1840,10 +1867,12 @@ export class HistoryAPI {
             const aisFilter = isAisVesselContext(String(context))
               ? ` WHERE context = '${escapeSqlString(String(context))}'`
               : '';
-            if (filePath.startsWith('cachelist:')) {
-              const localFiles = JSON.parse(
-                filePath.slice('cachelist:'.length)
-              ) as string[];
+            if (
+              filePath.startsWith('cachelist:') ||
+              filePath.startsWith('s3list:')
+            ) {
+              const marker = filePath.indexOf(':') + 1;
+              const localFiles = JSON.parse(filePath.slice(marker)) as string[];
               const literals = localFiles
                 .map(item => `'${escapeSqlString(item)}'`)
                 .join(', ');
@@ -1943,7 +1972,7 @@ export class HistoryAPI {
                     rawEarliestDate.getTime() - 86400000
                   );
                   if (fromDate <= s3ToDate) {
-                    const cloudFiles = await this.getCachedS3Files(
+                    const cloudFiles = await this.getCommittedS3Files(
                       s3Config,
                       'raw',
                       String(partitionContext),
@@ -1959,7 +1988,7 @@ export class HistoryAPI {
                   }
                 } else if (!rawEarliestDate) {
                   localFilePath = null;
-                  const cloudFiles = await this.getCachedS3Files(
+                  const cloudFiles = await this.getCommittedS3Files(
                     s3Config,
                     'raw',
                     String(partitionContext),

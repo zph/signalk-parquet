@@ -972,6 +972,8 @@ export default function (app: ServerAPI): SignalKPlugin {
                 '.s3-read-cache'
               ),
               cacheMaxMB: state.currentConfig.cloudUpload.readCacheMaxMB ?? 512,
+              readMode:
+                state.currentConfig.cloudUpload.cloudReadMode ?? 'direct',
               cacheNamespace: [
                 state.currentConfig.cloudUpload.provider,
                 isR2
@@ -1499,10 +1501,19 @@ export default function (app: ServerAPI): SignalKPlugin {
             type: 'integer',
             title: 'Local cloud-read cache (MB)',
             description:
-              'Maximum disk space used for cached S3 history reads. Least-recently-used Parquet files are evicted first. Set to 0 to disable cloud history reads.',
+              'Maximum disk space used in Local file cache mode. Least-recently-used Parquet files are evicted first. Set to 0 to disable cached cloud reads.',
             minimum: 0,
             maximum: 1048576,
             default: 512,
+          },
+          cloudReadMode: {
+            type: 'string',
+            title: 'Cloud history read mode',
+            description:
+              'Direct lets DuckDB range-read the committed S3 objects. Cache downloads complete files first for repeated or intermittently connected use.',
+            enum: ['direct', 'cache'],
+            enumNames: ['Direct S3 reads (recommended)', 'Local file cache'],
+            default: 'direct',
           },
         },
         dependencies: {

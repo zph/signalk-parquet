@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **Cloud history now uses immutable daily inventories and direct Parquet reads** — uploads verify each object, merge it into a content-addressed UTC-day manifest, and publish a small `latest.json` pointer only after the full day inventory is durable. History queries fetch those inventories instead of listing every day partition and probing every object sidecar, then give DuckDB the explicit committed S3/R2 keys so projection, predicate, and range-read optimizations remain available. Day lookups run eight at a time; missing or invalid manifests are reported as incomplete history. The previous bounded full-file cache remains available as an explicit compatibility/offline mode.
+- **Cloud reconciliation publishes per-day commit points after successful batches** — scheduled, startup, and manual sync paths do not begin advancing day inventories when any object in the upload batch fails, and existing inventories are merged so files removed by local retention are not dropped from cloud history.
+
 ## [0.7.44-beta.4] - 2026-09-10
 
 ### Security (PR #117, @msallin)

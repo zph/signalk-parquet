@@ -312,6 +312,8 @@ Configure cloud storage upload in the plugin configuration. Uploads run as part 
 | **Use Path-Style Addressing** | Path-style bucket addressing (`https://endpoint/bucket`); often required by self-hosted services. Defaults to enabled when a custom endpoint is set | auto |
 | **Allow Private/Local Endpoints** | Permit custom endpoints on private/loopback/link-local addresses (e.g. `192.168.x.x`, `localhost`). Required for self-hosted storage on the boat LAN; off by default to prevent SSRF (since v0.7.44-beta.2) | `false` |
 | **Delete After Upload** | Delete local files after upload | `false` |
+| **Cloud History Read Mode** | `direct` lets DuckDB range-read the explicit S3 keys committed by each day manifest; `cache` downloads and verifies complete files first | `direct` |
+| **Local Cloud-Read Cache** | Maximum cache size used only in `cache` mode | `512 MB` |
 
 > **Upload timeouts (v0.7.44+):** cloud requests are bounded (10 s to connect, 60 s per request) so a dead or stalled uplink fails the upload — which is retried — instead of hanging the daily export pipeline.
 
@@ -1095,13 +1097,13 @@ curl "http://localhost:3000/signalk/v1/history/values?duration=7d&paths=environm
 Queries resolve data from a three-tier hierarchy, selected automatically based on date ranges:
 
 1. **Local tiered Parquet** — Primary source. Uses aggregation tiers (`raw`, `5s`, `60s`, `1h`) based on query resolution. Data available from first export through yesterday.
-2. **Cloud supplement (S3/R2)** — For dates before local data starts (older than `retentionDays`). DuckDB queries cloud storage directly without downloading files first.
+2. **Cloud supplement (S3/R2)** — For dates before local data starts, the plugin reads one immutable inventory per day and gives DuckDB the explicit committed object keys. In the default `direct` mode DuckDB uses Parquet range reads; optional `cache` mode downloads complete files first.
 3. **SQLite buffer** — Today's live data, not yet exported to Parquet. Bucketed to match the query resolution.
 
 For queries spanning multiple sources, results are combined with UNION.
 
 **Cloud Query Optimization:**
-DuckDB's native cloud storage support provides:
+The stable per-day pointer names an immutable, checksum-addressed manifest. This avoids bucket listings and per-object manifest probes during a query, makes a missing day explicit, and prevents DuckDB from seeing files that were uploaded but not committed. DuckDB's native cloud storage support then provides:
 - **Partition pruning**: Hive structure (`year=/day=`) allows skipping irrelevant files
 - **Predicate pushdown**: WHERE clauses filter at Parquet level before transfer
 - **Projection pushdown**: Only SELECT columns are transferred
@@ -1449,7 +1451,11 @@ For Cloudflare R2, use `provider: "r2"` and supply `accountId` instead of `regio
 With prefix `marine-data/` and Hive partitioning:
 ```
 marine-data/tier=raw/context=vessels__self/path=navigation__position/year=2026/day=062/signalk_data_2026-03-03T0400.parquet
+marine-data/_manifests/year=2026/day=062/<sha256>.json
+marine-data/_manifests/year=2026/day=062/latest.json
 ```
+
+The content-addressed manifest contains every committed object for that UTC day across all tiers, contexts, and paths. Uploads verify object size, row count, and SHA-256 before publishing a new immutable generation; `latest.json` is written last as the atomic commit point. Reconciliation merges with the previous generation so locally expired files remain in the cloud inventory.
 
 ## Daily Export
 
@@ -1458,9 +1464,9 @@ The plugin uses an hourly export and daily compaction pipeline:
 1. **Data Collection**: Signal K data is buffered in crash-safe SQLite WAL database
 2. **Hourly Export**: Just after each UTC hour, exports completed-hour data per path (AIS vessels share files) and marks SQLite rows exported only after the file's footer count matches the SQLite snapshot
    - Verified exported rows are then deleted from SQLite. Incremental vacuuming trims up to 32 MiB per hourly export while the DB is over 128 MiB; below that it trims up to 8 MiB once per day when at least 32 MiB is free.
-3. **Daily Compaction**: At the configured UTC hour (default: 4 AM), merges each previous-day context/path group, sorted by event then receive timestamp, into Zstd-3 Parquet
+3. **Daily Compaction**: At the configured UTC hour (default: 4 AM), merges each previous-day context/path group, sorted by event then receive timestamp, into Zstd-9 Parquet
 4. **Lease**: A renewable `.parquet-export.lock` prevents concurrent writers; interrupted compactions restore unpublished source files on restart
-5. **S3 Upload**: Uploads daily files if configured
+5. **S3 Commit**: Uploads and verifies the day's files, writes an immutable day inventory, then atomically publishes its pointer
 
 The SQLite buffer remains available for current-hour History API queries. Freed pages are reused until vacuumed; existing databases created without `auto_vacuum=INCREMENTAL` need a one-time offline conversion (`PRAGMA auto_vacuum=INCREMENTAL; VACUUM`) before incremental vacuuming can reclaim physical disk space. The lockfile protects local writers; it does not lock readers or provide a distributed lock for shared network storage.
 

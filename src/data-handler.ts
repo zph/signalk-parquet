@@ -33,6 +33,15 @@ import { extractCommandName } from './commands';
 import { resolveCustomS3Endpoint } from './utils/cloud-endpoint';
 import { DuckDBPool } from './utils/duckdb-pool';
 import {
+  CloudDayManifest,
+  CloudManifestObject,
+  dayManifestBase,
+  isCloudDayManifest,
+  isCloudDayPointer,
+  parseCloudDay,
+  sha256,
+} from './utils/s3-day-manifest';
+import {
   Context,
   Delta,
   hasValues,
@@ -1094,18 +1103,9 @@ export function initializeRegimenStates(
 // These functions have been replaced by the daily export system in parquet-export-service.ts
 // The new exportDayToParquet() creates consolidated daily files directly
 
-interface CloudObjectManifest {
-  version: 1;
-  key: string;
-  sha256: string;
-  bytes: number;
-  rows: number;
-  committedAt: string;
-}
-
 async function describeParquet(
   filePath: string
-): Promise<Omit<CloudObjectManifest, 'version' | 'key' | 'committedAt'>> {
+): Promise<Omit<CloudManifestObject, 'key'>> {
   const bytes = await fs.readFile(filePath);
   const connection = await DuckDBPool.getConnection();
   try {
@@ -1138,33 +1138,11 @@ async function bodyToBuffer(body: any): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-async function readCloudManifest(
-  client: any,
-  target: CloudTarget,
-  key: string
-): Promise<CloudObjectManifest | undefined> {
-  if (!GetObjectCommand) return undefined;
-  try {
-    const response = await client.send(
-      new GetObjectCommand({
-        Bucket: target.bucket,
-        Key: `${key}.manifest.json`,
-      })
-    );
-    const json = JSON.parse(
-      (await bodyToBuffer(response.Body)).toString('utf8')
-    ) as CloudObjectManifest;
-    return json?.version === 1 && json.key === key ? json : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 async function remoteObjectMatches(
   client: any,
   target: CloudTarget,
   key: string,
-  descriptor: Omit<CloudObjectManifest, 'version' | 'key' | 'committedAt'>,
+  descriptor: Omit<CloudManifestObject, 'key'>,
   verifyPayload = false
 ): Promise<boolean> {
   if (!HeadObjectCommand || !GetObjectCommand) return false;
@@ -1191,6 +1169,148 @@ async function remoteObjectMatches(
   }
 }
 
+function keyPrefixFromObject(key: string): string {
+  const marker = key.indexOf('tier=');
+  return marker <= 0 ? '' : key.slice(0, marker).replace(/\/$/, '');
+}
+
+async function readCommittedDayManifest(
+  client: any,
+  bucket: string,
+  keyPrefix: string,
+  year: number,
+  day: string
+): Promise<CloudDayManifest | undefined> {
+  const base = dayManifestBase(keyPrefix, year, day);
+  try {
+    const pointerResponse = await client.send(
+      new GetObjectCommand({ Bucket: bucket, Key: `${base}/latest.json` })
+    );
+    const pointer = JSON.parse(
+      (await bodyToBuffer(pointerResponse.Body)).toString('utf8')
+    );
+    if (!isCloudDayPointer(pointer)) return undefined;
+    if (pointer.manifestKey !== `${base}/${pointer.sha256}.json`)
+      return undefined;
+    const manifestResponse = await client.send(
+      new GetObjectCommand({ Bucket: bucket, Key: pointer.manifestKey })
+    );
+    const bytes = await bodyToBuffer(manifestResponse.Body);
+    if (sha256(bytes) !== pointer.sha256) return undefined;
+    const manifest = JSON.parse(bytes.toString('utf8'));
+    return isCloudDayManifest(manifest, year, day) ? manifest : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Publish an immutable day inventory, then atomically move its small pointer. */
+export async function commitCloudDayManifest(
+  client: any,
+  bucket: string,
+  keyPrefix: string,
+  year: number,
+  day: string,
+  additions: CloudManifestObject[]
+): Promise<void> {
+  if (!client || !PutObjectCommand || !GetObjectCommand)
+    throw new Error('Cloud manifest SDK is unavailable');
+  const existing = await readCommittedDayManifest(
+    client,
+    bucket,
+    keyPrefix,
+    year,
+    day
+  );
+  const byKey = new Map<string, CloudManifestObject>();
+  for (const object of existing?.objects || []) byKey.set(object.key, object);
+  for (const object of additions) byKey.set(object.key, object);
+  const objects = Array.from(byKey.values()).sort((a, b) =>
+    a.key.localeCompare(b.key)
+  );
+  if (existing && JSON.stringify(existing.objects) === JSON.stringify(objects))
+    return;
+  const manifest: CloudDayManifest = {
+    version: 2,
+    year,
+    day,
+    generatedAt: new Date().toISOString(),
+    objects,
+  };
+  const manifestBody = Buffer.from(JSON.stringify(manifest));
+  const manifestSha = sha256(manifestBody);
+  const base = dayManifestBase(keyPrefix, year, day);
+  const manifestKey = `${base}/${manifestSha}.json`;
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: manifestKey,
+      Body: manifestBody,
+      ContentType: 'application/json',
+      Metadata: { sha256: manifestSha },
+    })
+  );
+  const storedManifest = await client.send(
+    new GetObjectCommand({ Bucket: bucket, Key: manifestKey })
+  );
+  if (sha256(await bodyToBuffer(storedManifest.Body)) !== manifestSha)
+    throw new Error('Immutable day manifest failed checksum verification');
+
+  const pointerBody = Buffer.from(
+    JSON.stringify({
+      version: 1,
+      manifestKey,
+      sha256: manifestSha,
+      committedAt: new Date().toISOString(),
+    })
+  );
+  const pointerSha = sha256(pointerBody);
+  const pointerKey = `${base}/latest.json`;
+  await client.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: pointerKey,
+      Body: pointerBody,
+      ContentType: 'application/json',
+      Metadata: { sha256: pointerSha },
+    })
+  );
+  const storedPointer = await client.send(
+    new GetObjectCommand({ Bucket: bucket, Key: pointerKey })
+  );
+  if (sha256(await bodyToBuffer(storedPointer.Body)) !== pointerSha)
+    throw new Error('Day manifest pointer failed checksum verification');
+}
+
+export async function commitCloudObjects(
+  client: any,
+  bucket: string,
+  keyPrefix: string,
+  objects: CloudManifestObject[]
+): Promise<void> {
+  const byDay = new Map<
+    string,
+    { year: number; day: string; objects: CloudManifestObject[] }
+  >();
+  for (const object of objects) {
+    const parsed = parseCloudDay(object.key);
+    const groupKey = `${parsed.year}-${parsed.day}`;
+    const group = byDay.get(groupKey) || { ...parsed, objects: [] };
+    group.objects.push(object);
+    byDay.set(groupKey, group);
+  }
+  for (const group of byDay.values()) {
+    await commitCloudDayManifest(
+      client,
+      bucket,
+      keyPrefix,
+      group.year,
+      group.day,
+      group.objects
+    );
+  }
+}
+
 /** Upload one Parquet object transactionally. The local file is eligible for
  * deletion only after the object is read back and verified and its manifest
  * has been committed and verified remotely. */
@@ -1199,84 +1319,56 @@ export async function uploadVerifiedCloudObject(
   cloudKey: string,
   client: any,
   bucket: string,
-  deleteAfterUpload = false
-): Promise<void> {
+  deleteAfterUpload = false,
+  commitManifest = true
+): Promise<CloudManifestObject> {
   if (!client || !PutObjectCommand || !HeadObjectCommand || !GetObjectCommand)
     throw new Error('Cloud verification SDK is unavailable');
   try {
-    const descriptor = await describeParquet(filePath);
-    const target = { client, bucket } as CloudTarget;
-    const existingManifest = await readCloudManifest(client, target, cloudKey);
-    if (
-      existingManifest &&
-      existingManifest.sha256 === descriptor.sha256 &&
-      existingManifest.bytes === descriptor.bytes &&
-      existingManifest.rows === descriptor.rows &&
-      (await remoteObjectMatches(client, target, cloudKey, descriptor, true))
-    ) {
-      if (deleteAfterUpload) await fs.unlink(filePath);
-      return;
-    }
-    const fileContent = await fs.readFile(filePath);
-    await client.send(
-      new PutObjectCommand({
-        Bucket: bucket,
-        Key: cloudKey,
-        Body: fileContent,
-        ContentType: 'application/octet-stream',
-        Metadata: { sha256: descriptor.sha256, rows: String(descriptor.rows) },
-      })
-    );
-
-    if (
-      !(await remoteObjectMatches(client, target, cloudKey, descriptor, true))
-    ) {
-      throw new Error(
-        'Uploaded object failed size, checksum, or row-count verification'
-      );
-    }
-
-    const manifest: CloudObjectManifest = {
-      version: 1,
+    const descriptor: CloudManifestObject = {
       key: cloudKey,
-      ...descriptor,
-      committedAt: new Date().toISOString(),
+      ...(await describeParquet(filePath)),
     };
-    const manifestBody = Buffer.from(JSON.stringify(manifest));
-    await client.send(
-      new PutObjectCommand({
-        Bucket: bucket,
-        Key: `${cloudKey}.manifest.json`,
-        Body: manifestBody,
-        ContentType: 'application/json',
-        Metadata: {
-          sha256: createHash('sha256').update(manifestBody).digest('hex'),
-        },
-      })
-    );
-    const manifestHead = await client.send(
-      new HeadObjectCommand({
-        Bucket: bucket,
-        Key: `${cloudKey}.manifest.json`,
-      })
-    );
-    if (Number(manifestHead.ContentLength) !== manifestBody.length) {
-      throw new Error('Committed manifest failed size verification');
+    const target = { client, bucket } as CloudTarget;
+    if (!(await remoteObjectMatches(client, target, cloudKey, descriptor))) {
+      const fileContent = await fs.readFile(filePath);
+      await client.send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: cloudKey,
+          Body: fileContent,
+          ContentType: 'application/octet-stream',
+          Metadata: {
+            sha256: descriptor.sha256,
+            rows: String(descriptor.rows),
+          },
+        })
+      );
+
+      if (
+        !(await remoteObjectMatches(client, target, cloudKey, descriptor, true))
+      ) {
+        throw new Error(
+          'Uploaded object failed size, checksum, or row-count verification'
+        );
+      }
     }
-    const committedManifest = await client.send(
-      new GetObjectCommand({ Bucket: bucket, Key: `${cloudKey}.manifest.json` })
-    );
-    const committedBytes = await bodyToBuffer(committedManifest.Body);
-    if (
-      createHash('sha256').update(committedBytes).digest('hex') !==
-      createHash('sha256').update(manifestBody).digest('hex')
-    ) {
-      throw new Error('Committed manifest failed checksum verification');
+    if (commitManifest) {
+      const { year, day } = parseCloudDay(cloudKey);
+      await commitCloudDayManifest(
+        client,
+        bucket,
+        keyPrefixFromObject(cloudKey),
+        year,
+        day,
+        [descriptor]
+      );
     }
 
     if (deleteAfterUpload) {
       await fs.unlink(filePath);
     }
+    return descriptor;
   } catch (err) {
     throw new Error(
       `Cloud transaction failed for ${cloudKey}: ${(err as Error).message}`,
@@ -1289,21 +1381,22 @@ async function putToCloud(
   filePath: string,
   target: CloudTarget,
   config: PluginConfig
-): Promise<boolean> {
+): Promise<{ filePath: string; object: CloudManifestObject } | null> {
   try {
-    await uploadVerifiedCloudObject(
+    const object = await uploadVerifiedCloudObject(
       filePath,
       getCloudKey(filePath, target, config),
       target.client,
       target.bucket,
-      target.deleteAfterUpload
+      false,
+      false
     );
-    return true;
+    return { filePath, object };
   } catch (err) {
     _appInstance?.error(
       `[CloudSync] Upload failed for ${filePath}: ${(err as Error).message}`
     );
-    return false;
+    return null;
   }
 }
 
@@ -1362,14 +1455,23 @@ async function uploadMissingFiles(
 
   let uploaded = 0;
   const failures: string[] = [];
+  const completed: Array<{
+    filePath: string;
+    object: CloudManifestObject;
+  }> = [];
   for (let i = 0; i < missing.length; i += concurrency) {
     const batch = missing.slice(i, i + concurrency);
     const results = await Promise.all(
       batch.map(f => putToCloud(f, target, config))
     );
-    uploaded += results.filter(Boolean).length;
+    const batchCompleted = results.filter(
+      (result): result is { filePath: string; object: CloudManifestObject } =>
+        result !== null
+    );
+    uploaded += batchCompleted.length;
+    completed.push(...batchCompleted);
     batch.forEach((file, index) => {
-      if (!results[index]) failures.push(file);
+      if (results[index] === null) failures.push(file);
     });
     // Yield to event loop between batches
     await new Promise(resolve => setTimeout(resolve, 10));
@@ -1378,6 +1480,15 @@ async function uploadMissingFiles(
     throw new Error(
       `${failures.length} object(s) failed transactional cloud reconciliation; first: ${failures[0]}`
     );
+  await commitCloudObjects(
+    target.client,
+    target.bucket,
+    target.keyPrefix,
+    completed.map(item => item.object)
+  );
+  if (target.deleteAfterUpload) {
+    await Promise.all(completed.map(item => fs.unlink(item.filePath)));
+  }
   return uploaded;
 }
 

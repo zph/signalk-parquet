@@ -1,6 +1,7 @@
 import * as fs from 'fs-extra';
 import * as path from 'path';
 import { createHash } from 'crypto';
+import { CloudManifestObject } from './s3-day-manifest';
 
 /** Disk-backed, byte-bounded LRU cache for committed S3 Parquet objects. */
 export class S3ReadCache {
@@ -96,6 +97,47 @@ export class S3ReadCache {
       }
     }
     return { files: paths, incomplete };
+  }
+
+  /** Optional compatibility/offline mode for objects selected by a day manifest. */
+  async cacheCommitted(
+    client: any,
+    bucket: string,
+    objects: CloudManifestObject[]
+  ): Promise<{ files: string[]; incomplete: boolean }> {
+    if (this.maxBytes <= 0)
+      return { files: [], incomplete: objects.length > 0 };
+    const aws = await this.getCommands();
+    const files: string[] = [];
+    let incomplete = false;
+    for (const object of objects) {
+      try {
+        const head = await client.send(
+          new aws.HeadObjectCommand({ Bucket: bucket, Key: object.key })
+        );
+        if (
+          Number(head.ContentLength) !== object.bytes ||
+          head.Metadata?.sha256 !== object.sha256 ||
+          Number(head.Metadata?.rows) !== object.rows
+        ) {
+          incomplete = true;
+          continue;
+        }
+        files.push(
+          await this.cacheObject(
+            client,
+            bucket,
+            object.key,
+            head,
+            object.sha256,
+            aws
+          )
+        );
+      } catch {
+        incomplete = true;
+      }
+    }
+    return { files, incomplete };
   }
 
   private async cacheObject(
