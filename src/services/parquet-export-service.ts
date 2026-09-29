@@ -35,62 +35,6 @@ export interface ExportResult {
   errors: string[];
 }
 
-const ISO_MILLIS_FORMAT = '%Y-%m-%dT%H:%M:%S.%gZ';
-
-/**
- * Build a compaction projection for the columns DuckDB found in a raw group.
- *
- * A short-lived schema-v2 build wrote `event_time` plus
- * `received_delay_us`. Those files can remain beside current-schema files
- * after the build is rolled back. Normalize them during daily compaction so
- * the durable output once again exposes the canonical string timestamps.
- */
-function dailyCompactionSelect(source: string, columns: Set<string>): string {
-  if (columns.has('event_time')) {
-    const eventIso =
-      `strftime(TRY_CAST(event_time AS TIMESTAMP), ` +
-      `'${ISO_MILLIS_FORMAT}')`;
-    const receivedV2 = columns.has('received_delay_us')
-      ? `strftime(TRY_CAST(event_time AS TIMESTAMP) + ` +
-        `TRY_CAST(received_delay_us AS BIGINT) * INTERVAL '1 microsecond', ` +
-        `'${ISO_MILLIS_FORMAT}')`
-      : eventIso;
-    const signalkTimestamp = columns.has('signalk_timestamp')
-      ? `COALESCE(CAST(signalk_timestamp AS VARCHAR), ${eventIso})`
-      : eventIso;
-    const receivedTimestamp = columns.has('received_timestamp')
-      ? `COALESCE(CAST(received_timestamp AS VARCHAR), ${receivedV2})`
-      : receivedV2;
-    const excluded = [
-      'signalk_timestamp',
-      'received_timestamp',
-      'event_time',
-      'received_delay_us',
-    ].filter(column => columns.has(column));
-
-    return `SELECT * EXCLUDE (${excluded.join(', ')}),
-      ${signalkTimestamp} AS signalk_timestamp,
-      ${receivedTimestamp} AS received_timestamp
-      FROM ${source}`;
-  }
-
-  return `SELECT * FROM ${source}`;
-}
-
-function dailyCompactionOrder(columns: Set<string>): string {
-  const timestamps = columns.has('event_time')
-    ? ['signalk_timestamp', 'received_timestamp']
-    : ['signalk_timestamp', 'received_timestamp'].filter(column =>
-        columns.has(column)
-      );
-  const order = [...timestamps, 'context', 'path'].filter(
-    (column, index, all) =>
-      all.indexOf(column) === index &&
-      (timestamps.includes(column) || columns.has(column))
-  );
-  return order.length > 0 ? ` ORDER BY ${order.join(', ')}` : '';
-}
-
 export class ParquetExportService {
   private readonly sqliteBuffer: SQLiteBuffer;
   private readonly parquetWriter: ParquetWriter;
@@ -476,19 +420,13 @@ export class ParquetExportService {
         const temp = output + '.tmp';
         const quote = (p: string): string => `'${p.replace(/'/g, "''")}'`;
         const sourceSql = group.map(quote).join(', ');
+        const sql = `COPY (
+        SELECT * FROM read_parquet([${sourceSql}], union_by_name=true, hive_partitioning=false)
+        ORDER BY signalk_timestamp, received_timestamp, context, path
+      ) TO ${quote(temp)} (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL ${PARQUET_ZSTD_LEVEL}, ROW_GROUP_SIZE ${PARQUET_ROW_GROUP_SIZE});`;
         try {
           const connection = await DuckDBPool.getConnection();
           try {
-            const source = `read_parquet([${sourceSql}], union_by_name=true, hive_partitioning=false)`;
-            const description = await connection.runAndReadAll(
-              `DESCRIBE SELECT * FROM ${source}`
-            );
-            const columns = new Set(
-              description.getRowObjects().map(row => String(row.column_name))
-            );
-            const select = dailyCompactionSelect(source, columns);
-            const order = dailyCompactionOrder(columns);
-            const sql = `COPY (${select}${order}) TO ${quote(temp)} (FORMAT PARQUET, COMPRESSION ZSTD, COMPRESSION_LEVEL ${PARQUET_ZSTD_LEVEL}, ROW_GROUP_SIZE ${PARQUET_ROW_GROUP_SIZE});`;
             await connection.runAndReadAll(sql);
             const counts = await connection.runAndReadAll(`
               SELECT
