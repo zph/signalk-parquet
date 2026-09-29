@@ -125,7 +125,9 @@ export async function reencodeParquetDirectory(
           throw new Error(`Source changed during rewrite: ${file}`);
         }
         await fs.chmod(temp, before.mode & 0o777);
-        const handle = await fs.open(temp, 'r');
+        // Windows requires a writable handle for FlushFileBuffers, which backs
+        // FileHandle.sync(). Opening read-only fails with EPERM there.
+        const handle = await fs.open(temp, 'r+');
         try {
           await handle.sync();
         } finally {
